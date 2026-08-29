@@ -1,0 +1,37 @@
+# sync-panes — broadcast your keystrokes to multiple herdr panes
+#
+# tmux-style synchronize-panes for herdr, as a plugin.
+# The `sync` action is a thin launcher: it opens the console as a
+# herdr-managed overlay pane. The real TUI runs as the `console` pane
+# entrypoint; herdr tears the pane down when the process exits.
+#
+# Local development:
+#   cargo build --release && mkdir -p bin && cp target/release/sync-panes bin/
+#   herdr plugin link .
+#
+# Install from GitHub:
+#   herdr plugin install <owner>/herdr-sync-panes
+
+id = "shaozk.sync-panes"
+name = "Sync Panes"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "tmux-style synchronize-panes: broadcast keystrokes to selected panes of the current tab."
+platforms = ["linux", "macos"]
+
+[[build]]
+platforms = ["linux", "macos"]
+command = ["sh", "scripts/build.sh"]
+
+[[actions]]
+id = "sync"
+title = "Sync Panes: broadcast keystrokes"
+platforms = ["linux", "macos"]
+command = ["./bin/sync-panes", "launch"]
+
+[[panes]]
+id = "console"
+title = "Sync Panes"
+placement = "overlay"
+platforms = ["linux", "macos"]
+command = ["./bin/sync-panes"]
