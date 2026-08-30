@@ -9,20 +9,27 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::borrow::Cow;
+use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::herdr::{self, PaneInfo};
 use crate::layout;
 
-const READ_LINES: usize = 14;
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const SEND_REFRESH_DELAY: Duration = Duration::from_millis(120);
+const READ_LINES: usize = 999;
+const READ_TICK: Duration = Duration::from_millis(50);
+const RENDER_TICK: Duration = Duration::from_millis(30);
+const BLINK_TICKS: u32 = 16;
+const INPUT_BATCH_WINDOW: Duration = Duration::from_millis(10);
 
-#[derive(Clone, Copy)]
-enum Payload<'a> {
-    Text(&'a str),
-    Key(&'a str),
+enum InputMsg {
+    Text(String),
+    Key(&'static str),
+}
+
+enum MirrorMsg {
+    Mirror(usize, Vec<Line<'static>>),
+    Dead(usize),
 }
 
 struct Target {
@@ -48,7 +55,7 @@ pub fn run(
     let mut sent: usize = 0;
     let mut notice: Option<String> = None;
     let mut cursor_on = true;
-    let mut next_poll = Instant::now();
+    let mut blink = 0u32;
 
     let master = std::env::var("SYNC_PANES_MASTER").ok();
     let probe = master
@@ -57,20 +64,79 @@ pub fn run(
         .unwrap_or_default();
     let snapshot = layout::capture(&probe);
 
-    loop {
-        if Instant::now() >= next_poll {
-            let read_lines = terminal
-                .size()
-                .map(|s| s.height.max(1) as usize)
-                .unwrap_or(READ_LINES);
-            refresh(&mut targets, read_lines);
-            cursor_on = !cursor_on;
-            next_poll = Instant::now() + POLL_INTERVAL;
+    let (mirror_tx, mirror_rx) = mpsc::channel::<MirrorMsg>();
+    let mut workers = Vec::new();
+    for (idx, t) in targets.iter().enumerate() {
+        let tx = mirror_tx.clone();
+        let pane = t.pane_id.clone();
+        workers.push(thread::spawn(move || loop {
+            let msg = match herdr::read_visible(&pane, READ_LINES) {
+                Ok(out) => MirrorMsg::Mirror(idx, parse_ansi(&out)),
+                Err(_) => MirrorMsg::Dead(idx),
+            };
+            if tx.send(msg).is_err() {
+                return;
+            }
+            thread::sleep(READ_TICK);
+        }));
+    }
+    drop(mirror_tx);
+
+    let (input_tx, input_rx) = mpsc::channel::<InputMsg>();
+    let send_panes: Vec<String> = targets.iter().map(|t| t.pane_id.clone()).collect();
+    let sender = thread::spawn(move || {
+        let mut dead: Vec<bool> = vec![false; send_panes.len()];
+        while let Ok(first) = input_rx.recv() {
+            let mut text = String::new();
+            let mut keys: Vec<&'static str> = Vec::new();
+            match first {
+                InputMsg::Text(s) => text.push_str(&s),
+                InputMsg::Key(k) => keys.push(k),
+            }
+            if text.is_empty() && keys.is_empty() {
+                continue;
+            }
+            while let Ok(next) = input_rx.recv_timeout(INPUT_BATCH_WINDOW) {
+                match next {
+                    InputMsg::Text(s) => {
+                        if !keys.is_empty() {
+                            break;
+                        }
+                        text.push_str(&s);
+                    }
+                    InputMsg::Key(k) => {
+                        keys.push(k);
+                        break;
+                    }
+                }
+            }
+            if !text.is_empty() {
+                dispatch(&send_panes, &mut dead, |p| herdr::send_text(p, &text));
+            }
+            for k in keys {
+                dispatch(&send_panes, &mut dead, |p| herdr::send_key(p, k));
+            }
         }
-        let timeout = next_poll.saturating_duration_since(Instant::now());
+    });
+
+    loop {
+        while let Ok(msg) = mirror_rx.try_recv() {
+            match msg {
+                MirrorMsg::Mirror(idx, lines) => {
+                    if let Some(t) = targets.get_mut(idx) {
+                        t.mirror = lines;
+                    }
+                }
+                MirrorMsg::Dead(idx) => {
+                    if let Some(t) = targets.get_mut(idx) {
+                        t.dead = true;
+                    }
+                }
+            }
+        }
         terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
 
-        if event::poll(timeout)? {
+        if event::poll(RENDER_TICK)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -79,25 +145,20 @@ pub fn run(
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), KeyModifiers::CONTROL) => break,
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        send_all(&mut targets, Payload::Key("ctrl+c"));
-                        next_poll = Instant::now() + SEND_REFRESH_DELAY;
+                        let _ = input_tx.send(InputMsg::Key("ctrl+c"));
                     }
                     (KeyCode::Esc, _) => {
-                        send_all(&mut targets, Payload::Key("esc"));
-                        next_poll = Instant::now() + SEND_REFRESH_DELAY;
+                        let _ = input_tx.send(InputMsg::Key("esc"));
                     }
                     (KeyCode::Enter, _) => {
-                        send_all(&mut targets, Payload::Key("enter"));
-                        next_poll = Instant::now() + SEND_REFRESH_DELAY;
+                        let _ = input_tx.send(InputMsg::Key("enter"));
                     }
                     (KeyCode::Backspace, _) => {
-                        send_all(&mut targets, Payload::Key("backspace"));
-                        next_poll = Instant::now() + SEND_REFRESH_DELAY;
+                        let _ = input_tx.send(InputMsg::Key("backspace"));
                     }
                     (KeyCode::Char(ch), KeyModifiers::NONE) | (KeyCode::Char(ch), KeyModifiers::SHIFT) => {
                         let mut buf = [0u8; 4];
-                        send_all(&mut targets, Payload::Text(ch.encode_utf8(&mut buf)));
-                        next_poll = Instant::now() + SEND_REFRESH_DELAY;
+                        let _ = input_tx.send(InputMsg::Text(ch.encode_utf8(&mut buf).to_string()));
                     }
                     (KeyCode::Char(ch), KeyModifiers::CONTROL) => {
                         notice = Some(format!("ctrl+{} is outside the v1 key set — not sent", ch));
@@ -108,6 +169,11 @@ pub fn run(
                 }
                 sent = sent.saturating_add(1);
             }
+        } else {
+            blink = blink.saturating_add(1);
+            if blink % BLINK_TICKS == 0 {
+                cursor_on = !cursor_on;
+            }
         }
 
         if !targets.is_empty() && targets.iter().all(|t| t.dead) {
@@ -117,6 +183,13 @@ pub fn run(
             break;
         }
     }
+
+    drop(input_tx);
+    drop(mirror_rx);
+    for w in workers {
+        let _ = w.join();
+    }
+    let _ = sender.join();
 
     let mut probes: Vec<&str> = Vec::new();
     if let Some(m) = master.as_deref() {
@@ -129,36 +202,22 @@ pub fn run(
     Ok(())
 }
 
-fn send_all(targets: &mut [Target], payload: Payload) {
+fn dispatch<F>(panes: &[String], dead: &mut [bool], send: F)
+where
+    F: Fn(&str) -> anyhow::Result<()> + Sync,
+{
     thread::scope(|s| {
         let mut handles = Vec::new();
-        for t in targets.iter_mut().filter(|t| !t.dead) {
-            let pane = t.pane_id.clone();
-            handles.push((t, s.spawn(move || match payload {
-                Payload::Text(text) => herdr::send_text(&pane, text),
-                Payload::Key(key) => herdr::send_key(&pane, key),
-            })));
-        }
-        for (t, handle) in handles {
-            match handle.join() {
-                Ok(Ok(())) => {}
-                _ => t.dead = true,
+        for (i, pane) in panes.iter().enumerate() {
+            if dead[i] {
+                continue;
             }
+            let send = &send;
+            handles.push((i, s.spawn(move || send(pane))));
         }
-    });
-}
-
-fn refresh(targets: &mut [Target], lines: usize) {
-    thread::scope(|s| {
-        let mut handles = Vec::new();
-        for t in targets.iter_mut().filter(|t| !t.dead) {
-            let pane = t.pane_id.clone();
-            handles.push((t, s.spawn(move || herdr::read_visible(&pane, lines))));
-        }
-        for (t, handle) in handles {
-            match handle.join() {
-                Ok(Ok(out)) => t.mirror = parse_ansi(&out),
-                _ => t.dead = true,
+        for (i, handle) in handles {
+            if handle.join().map(|r| r.is_err()).unwrap_or(true) {
+                dead[i] = true;
             }
         }
     });
