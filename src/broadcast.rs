@@ -1,16 +1,19 @@
 use anyhow::Result;
+use ansi_to_tui::IntoText;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
-    style::{Stylize},
-    text::Line,
+    style::{Modifier, Style, Stylize},
+    text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame, Terminal,
 };
+use std::borrow::Cow;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::herdr::{self, PaneInfo};
+use crate::herdr::{self, PaneInfo, Rect};
+use crate::layout;
 
 const READ_LINES: usize = 14;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -26,7 +29,7 @@ struct Target {
     pane_id: String,
     label: String,
     dead: bool,
-    output: String,
+    mirror: Vec<Line<'static>>,
 }
 
 pub fn run(
@@ -39,21 +42,25 @@ pub fn run(
             label: label_of(&p),
             pane_id: p.pane_id,
             dead: false,
-            output: String::new(),
+            mirror: Vec::new(),
         })
         .collect();
     let mut input = String::new();
     let mut sent: usize = 0;
     let mut notice: Option<String> = None;
+    let mut cursor_on = true;
     let mut next_poll = Instant::now();
+
+    let originals = capture_and_align(&targets, &mut notice);
 
     loop {
         if Instant::now() >= next_poll {
             refresh(&mut targets);
+            cursor_on = !cursor_on;
             next_poll = Instant::now() + POLL_INTERVAL;
         }
         let timeout = next_poll.saturating_duration_since(Instant::now());
-        terminal.draw(|f| draw(f, &targets, &input, sent, &notice))?;
+        terminal.draw(|f| draw(f, &targets, &input, sent, &notice, cursor_on))?;
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
@@ -101,12 +108,56 @@ pub fn run(
 
         if !targets.is_empty() && targets.iter().all(|t| t.dead) {
             notice = Some("all targets are gone — exiting".to_string());
-            terminal.draw(|f| draw(f, &targets, &input, sent, &notice))?;
+            terminal.draw(|f| draw(f, &targets, &input, sent, &notice, cursor_on))?;
             thread::sleep(Duration::from_millis(1200));
             break;
         }
     }
+
+    if !originals.is_empty() {
+        let _ = layout::drive_all(&originals);
+    }
     Ok(())
+}
+
+fn capture_and_align(selected: &[Target], notice: &mut Option<String>) -> Vec<(String, Rect)> {
+    let Some(master) = std::env::var("SYNC_PANES_MASTER").ok() else {
+        return Vec::new();
+    };
+    let Ok(layout0) = herdr::tab_layout(&master) else {
+        return Vec::new();
+    };
+    let originals: Vec<(String, Rect)> = selected
+        .iter()
+        .filter_map(|t| layout::rect_of(&layout0, &t.pane_id).map(|r| (t.pane_id.clone(), r)))
+        .collect();
+    let Some(goal) = layout::rect_of(&layout0, &master) else {
+        return originals;
+    };
+    let goals: Vec<(String, Rect)> = originals.iter().map(|(id, _)| (id.clone(), goal)).collect();
+    match layout::drive_all(&goals) {
+        Ok(_) => {
+            let aligned = herdr::tab_layout(&master)
+                .map(|l| {
+                    goals
+                        .iter()
+                        .filter(|(id, g)| layout::aligned(&l, id, *g))
+                        .count()
+                })
+                .unwrap_or(0);
+            let total = goals.len();
+            *notice = Some(if aligned == total {
+                format!(
+                    "shadow on — {total} pane{s} matched master size",
+                    s = if total == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("shadow on — size best-effort {aligned}/{total}")
+            });
+        }
+        Err(_) => *notice = Some("shadow on — size alignment failed".to_string()),
+    }
+    originals
 }
 
 fn send_all(targets: &mut [Target], payload: Payload) {
@@ -137,11 +188,67 @@ fn refresh(targets: &mut [Target]) {
         }
         for (t, handle) in handles {
             match handle.join() {
-                Ok(Ok(out)) => t.output = out,
+                Ok(Ok(out)) => t.mirror = parse_ansi(&out),
                 _ => t.dead = true,
             }
         }
     });
+}
+
+fn parse_ansi(raw: &str) -> Vec<Line<'static>> {
+    match raw.into_text() {
+        Ok(text) => text
+            .lines
+            .into_iter()
+            .map(|l| {
+                let style = l.style;
+                Line::from(
+                    l.spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.into_owned(), style.patch(s.style)))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect(),
+        Err(_) => strip_ansi(raw)
+            .lines()
+            .map(|l| Line::from(l.to_string()))
+            .collect(),
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c2 in chars.by_ref() {
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut prev = '\0';
+                for c2 in chars.by_ref() {
+                    if c2 == '\x07' {
+                        break;
+                    }
+                    if prev == '\x1b' && c2 == '\\' {
+                        break;
+                    }
+                    prev = c2;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn label_of(info: &PaneInfo) -> String {
@@ -151,7 +258,14 @@ fn label_of(info: &PaneInfo) -> String {
     }
 }
 
-fn draw(f: &mut Frame, targets: &[Target], input: &str, sent: usize, notice: &Option<String>) {
+fn draw(
+    f: &mut Frame,
+    targets: &[Target],
+    input: &str,
+    sent: usize,
+    notice: &Option<String>,
+    cursor_on: bool,
+) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).split(area);
 
@@ -181,13 +295,50 @@ fn draw(f: &mut Frame, targets: &[Target], input: &str, sent: usize, notice: &Op
                 Paragraph::new(Line::from(" pane closed or unreachable ").red()),
             )
         } else {
-            let lines: Vec<Line> = t.output.lines().map(Line::from).collect();
             (
                 Line::from(format!(" {} ● ", t.label)).green(),
-                Paragraph::new(lines),
+                Paragraph::new(with_cursor(&t.mirror, cursor_on)),
             )
         };
         let block = Block::bordered().title(title);
         f.render_widget(body.block(block), *cell);
     }
+}
+
+fn with_cursor(lines: &[Line<'static>], cursor_on: bool) -> Vec<Line<'static>> {
+    let mut out = lines.to_vec();
+    if !cursor_on {
+        if out.is_empty() {
+            out.push(Line::from(""));
+        }
+        return out;
+    }
+    let row = out
+        .iter()
+        .rposition(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains(|c: char| !c.is_whitespace()))
+        })
+        .unwrap_or(out.len().saturating_sub(1));
+    if let Some(l) = out.get_mut(row) {
+        let mut spans = std::mem::take(&mut l.spans);
+        while let Some(last) = spans.last() {
+            if last.content.trim_end_matches(' ').is_empty() {
+                spans.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(last) = spans.last_mut() {
+            let trimmed = last.content.trim_end().to_string();
+            last.content = Cow::Owned(trimmed);
+        }
+        spans.push(Span::styled(
+            " ",
+            Style::default().add_modifier(Modifier::REVERSED),
+        ));
+        l.spans = spans;
+    }
+    out
 }

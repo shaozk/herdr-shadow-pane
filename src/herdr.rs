@@ -25,6 +25,67 @@ struct PaneCurrent {
     result: PaneCurrentInner,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rect {
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct TabLayout {
+    pub area: Rect,
+    pub panes: Vec<(String, Rect)>,
+}
+
+#[derive(Deserialize)]
+struct PaneLayoutResp {
+    result: PaneLayoutInner,
+}
+
+#[derive(Deserialize)]
+struct PaneLayoutInner {
+    layout: PaneLayoutFields,
+}
+
+#[derive(Deserialize)]
+struct PaneLayoutFields {
+    area: RectFields,
+    panes: Vec<PaneRectFields>,
+}
+
+#[derive(Deserialize)]
+struct RectFields {
+    width: i32,
+    height: i32,
+}
+
+#[derive(Deserialize)]
+struct PaneRectFields {
+    pane_id: String,
+    rect: RectFields,
+}
+
+#[derive(Deserialize)]
+struct PaneResizeResp {
+    result: PaneResizeInner,
+}
+
+#[derive(Deserialize)]
+struct PaneResizeInner {
+    resize: PaneResizeFields,
+}
+
+#[derive(Deserialize)]
+struct PaneResizeFields {
+    changed: bool,
+}
+
+impl From<RectFields> for Rect {
+    fn from(f: RectFields) -> Self {
+        Rect { width: f.width, height: f.height }
+    }
+}
+
 #[derive(Deserialize)]
 struct PaneCurrentInner {
     pane: PaneFields,
@@ -46,6 +107,8 @@ struct PaneFields {
     tab_id: String,
     workspace_id: String,
     #[serde(default)]
+    focused: bool,
+    #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
     agent_status: Option<String>,
@@ -53,6 +116,23 @@ struct PaneFields {
     terminal_title_stripped: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceList {
+    result: WorkspaceListInner,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceListInner {
+    workspaces: Vec<WorkspaceFields>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceFields {
+    workspace_id: String,
+    #[serde(default)]
+    focused: bool,
 }
 
 fn run_json(args: &[&str]) -> Result<serde_json::Value> {
@@ -130,8 +210,58 @@ pub fn send_key(pane_id: &str, key: &str) -> Result<()> {
     spawn(&["pane", "send-keys", pane_id, key])
 }
 
-pub fn read_visible(pane_id: &str, lines: usize) -> Result<String> {
-    let out = std::process::Command::new(HERDR_BIN)
+pub fn focused_pane_id() -> Result<String> {
+    let value = run_json(&["workspace", "list"])?;
+    let parsed: WorkspaceList =
+        serde_json::from_value(value).context("unexpected workspace list response")?;
+    let ws = parsed
+        .result
+        .workspaces
+        .into_iter()
+        .find(|w| w.focused)
+        .context("no focused workspace")?;
+    let value = run_json(&["pane", "list", "--workspace", &ws.workspace_id])?;
+    let parsed: PaneList = serde_json::from_value(value).context("unexpected pane list response")?;
+    parsed
+        .result
+        .panes
+        .into_iter()
+        .find(|p| p.focused)
+        .map(|p| p.pane_id)
+        .context("no focused pane")
+}
+
+pub fn tab_layout(any_pane_in_tab: &str) -> Result<TabLayout> {
+    let value = run_json(&["pane", "layout", "--pane", any_pane_in_tab])?;
+    let parsed: PaneLayoutResp = serde_json::from_value(value).context("unexpected pane layout response")?;
+    let layout = parsed.result.layout;
+    Ok(TabLayout {
+        area: layout.area.into(),
+        panes: layout
+            .panes
+            .into_iter()
+            .map(|p| (p.pane_id, p.rect.into()))
+            .collect(),
+    })
+}
+
+pub fn resize_pane(pane_id: &str, direction: &str, amount: f64) -> Result<bool> {
+    let value = run_json(&[
+        "pane",
+        "resize",
+        "--pane",
+        pane_id,
+        "--direction",
+        direction,
+        "--amount",
+        &format!("{amount:.4}"),
+    ])?;
+    let parsed: PaneResizeResp =
+        serde_json::from_value(value).context("unexpected pane resize response")?;
+    Ok(parsed.result.resize.changed)
+}
+
+pub fn read_visible(pane_id: &str, lines: usize) -> Result<String> {    let out = std::process::Command::new(HERDR_BIN)
         .args([
             "pane",
             "read",
@@ -141,7 +271,7 @@ pub fn read_visible(pane_id: &str, lines: usize) -> Result<String> {
             "--lines",
             &lines.to_string(),
             "--format",
-            "text",
+            "ansi",
         ])
         .output()
         .with_context(|| format!("failed to run {HERDR_BIN} pane read {pane_id}"))?;

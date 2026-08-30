@@ -14,7 +14,7 @@
 
 id = "shaozk.sync-panes"
 name = "Sync Panes"
-version = "0.1.0"
+version = "0.4.0"
 min_herdr_version = "0.8.0"
 description = "tmux-style synchronize-panes: broadcast keystrokes to selected panes of the current tab."
 platforms = ["linux", "macos"]

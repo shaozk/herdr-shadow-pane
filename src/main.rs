@@ -1,5 +1,6 @@
 mod broadcast;
 mod herdr;
+mod layout;
 mod picker;
 
 use anyhow::{bail, Context as _, Result};
@@ -9,6 +10,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+
+use crate::herdr::Rect;
 
 const PLUGIN_ID: &str = "shaozk.sync-panes";
 
@@ -31,6 +34,9 @@ fn run() -> Result<()> {
     }
     if std::env::var_os("SYNC_PANES_DEBUG_LIST").is_some() {
         return debug_list();
+    }
+    if let Ok(master) = std::env::var("SYNC_PANES_DEBUG_ALIGN") {
+        return debug_align(&master);
     }
 
     let ctx = herdr::resolve_context()?;
@@ -65,18 +71,22 @@ fn restore_terminal() -> Result<()> {
 }
 
 fn launch() -> Result<()> {
-    let status = std::process::Command::new(herdr::HERDR_BIN)
-        .args([
-            "plugin",
-            "pane",
-            "open",
-            "--plugin",
-            PLUGIN_ID,
-            "--entrypoint",
-            "console",
-            "--placement",
-            "overlay",
-        ])
+    let mut cmd = std::process::Command::new(herdr::HERDR_BIN);
+    cmd.args([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "console",
+        "--placement",
+        "overlay",
+    ]);
+    if let Ok(master) = herdr::focused_pane_id() {
+        cmd.arg("--env").arg(format!("SYNC_PANES_MASTER={master}"));
+    }
+    let status = cmd
         .status()
         .context("failed to run herdr (is it on PATH?)")?;
     if !status.success() {
@@ -97,6 +107,37 @@ fn debug_list() -> Result<()> {
             p.agent,
             p.agent_status,
             p.title
+        );
+    }
+    Ok(())
+}
+
+fn debug_align(master: &str) -> Result<()> {
+    let layout0 = herdr::tab_layout(master)?;
+    let goal = layout::rect_of(&layout0, master).context("master pane not found in layout")?;
+    let self_id = std::env::var("HERDR_PANE_ID").ok();
+    let goals: Vec<(String, Rect)> = layout0
+        .panes
+        .iter()
+        .map(|(id, _)| id.clone())
+        .filter(|id| id != master && Some(id) != self_id.as_ref())
+        .map(|id| (id, goal))
+        .collect();
+    println!("master goal: {}x{}", goal.width, goal.height);
+    for (id, r) in &goals {
+        println!("  before {id}: {}x{}", r.width, r.height);
+    }
+    layout::drive_all(&goals)?;
+    let after = herdr::tab_layout(master)?;
+    for (id, g) in &goals {
+        let r = layout::rect_of(&after, id).unwrap_or_default();
+        println!(
+            "  after  {id}: {}x{} (goal {}x{}, aligned={})",
+            r.width,
+            r.height,
+            g.width,
+            g.height,
+            layout::aligned(&after, id, *g)
         );
     }
     Ok(())
