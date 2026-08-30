@@ -16,6 +16,7 @@ use crate::herdr::{self, PaneInfo, Rect};
 use crate::layout;
 
 const READ_LINES: usize = 14;
+const CHROME_ROWS: u16 = 5;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SEND_REFRESH_DELAY: Duration = Duration::from_millis(120);
 
@@ -55,7 +56,11 @@ pub fn run(
 
     loop {
         if Instant::now() >= next_poll {
-            refresh(&mut targets);
+            let read_lines = terminal
+                .size()
+                .map(|s| (s.height.saturating_sub(CHROME_ROWS)).max(1) as usize)
+                .unwrap_or(READ_LINES);
+            refresh(&mut targets, read_lines);
             cursor_on = !cursor_on;
             next_poll = Instant::now() + POLL_INTERVAL;
         }
@@ -179,12 +184,12 @@ fn send_all(targets: &mut [Target], payload: Payload) {
     });
 }
 
-fn refresh(targets: &mut [Target]) {
+fn refresh(targets: &mut [Target], lines: usize) {
     thread::scope(|s| {
         let mut handles = Vec::new();
         for t in targets.iter_mut().filter(|t| !t.dead) {
             let pane = t.pane_id.clone();
-            handles.push((t, s.spawn(move || herdr::read_visible(&pane, READ_LINES))));
+            handles.push((t, s.spawn(move || herdr::read_visible(&pane, lines))));
         }
         for (t, handle) in handles {
             match handle.join() {
@@ -295,9 +300,11 @@ fn draw(
                 Paragraph::new(Line::from(" pane closed or unreachable ").red()),
             )
         } else {
+            let rows = cell.height.saturating_sub(2) as usize;
+            let shown = &t.mirror[t.mirror.len().saturating_sub(rows)..];
             (
                 Line::from(format!(" {} ● ", t.label)).green(),
-                Paragraph::new(with_cursor(&t.mirror, cursor_on)),
+                Paragraph::new(with_cursor(shown, cursor_on)),
             )
         };
         let block = Block::bordered().title(title);
