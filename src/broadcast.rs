@@ -57,7 +57,7 @@ pub fn run(
     let mut cursor_on = true;
     let mut blink = 0u32;
 
-    let master = std::env::var("SYNC_PANES_MASTER").ok();
+    let master = std::env::var("SHADOW_PANE_MASTER").ok();
     let probe = master
         .clone()
         .or_else(|| targets.first().map(|t| t.pane_id.clone()))
@@ -326,7 +326,7 @@ fn draw(
         } else {
             let rows = cell.height as usize;
             let shown = &t.mirror[t.mirror.len().saturating_sub(rows)..];
-            Paragraph::new(with_cursor(shown, cursor_on))
+            Paragraph::new(with_cursor(shown, cursor_on, cell.width))
         };
         f.render_widget(body, cell);
         if let Some(sep) = cells.get(i * 2 + 1) {
@@ -336,7 +336,7 @@ fn draw(
     }
 }
 
-fn with_cursor(lines: &[Line<'static>], cursor_on: bool) -> Vec<Line<'static>> {
+fn with_cursor(lines: &[Line<'static>], cursor_on: bool, width: u16) -> Vec<Line<'static>> {
     let mut out = lines.to_vec();
     if !cursor_on {
         if out.is_empty() {
@@ -365,11 +365,17 @@ fn with_cursor(lines: &[Line<'static>], cursor_on: bool) -> Vec<Line<'static>> {
             let trimmed = last.content.trim_end().to_string();
             last.content = Cow::Owned(trimmed);
         }
-        spans.push(Span::styled(
-            " ",
-            Style::default().add_modifier(Modifier::REVERSED),
-        ));
+        let line_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
         l.spans = spans;
+        let block =
+            || Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
+        if line_width < width {
+            l.spans.push(block());
+        } else if let Some(next) = out.get_mut(row + 1) {
+            next.spans.insert(0, block());
+        } else {
+            out.push(Line::from(vec![block()]));
+        }
     }
     out
 }
@@ -427,5 +433,42 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         assert!(!screen.contains("OLDLINE"), "stale mirror content: {screen:?}");
+    }
+
+    #[test]
+    fn cursor_wraps_when_anchor_line_fills_cell() {
+        let width = 40u16;
+        let mirror = parse_ansi(&format!("{}\r\n{}\r\n", "x".repeat(width as usize), " ".repeat(20)));
+        let mirror = with_cursor(&mirror, true, width);
+        let first: String = mirror[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(first.chars().count(), width as usize);
+        assert_eq!(mirror[1].spans[0].content, " ");
+    }
+
+    #[test]
+    fn cursor_visible_in_helix_like_screen() {
+        use ratatui::{backend::TestBackend, Terminal as TestTerminal};
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = TestTerminal::new(backend).unwrap();
+        let raw = format!("~\r\n~\r\n{}\r\n{}\r\n",
+            format!("~   {}  1 sel  1:1 ", "~".repeat(3)),
+            " ".repeat(40),
+        );
+        let targets = vec![Target {
+            pane_id: "t".into(),
+            label: "t".into(),
+            dead: false,
+            mirror: parse_ansi(&raw),
+        }];
+        terminal
+            .draw(|f| draw(f, &targets, 0, &None, true))
+            .unwrap();
+        let mut reversed = 0usize;
+        for cell in terminal.backend().buffer().content() {
+            if cell.modifier.contains(Modifier::REVERSED) {
+                reversed += 1;
+            }
+        }
+        assert!(reversed >= 1, "shadow cursor must be visible, got {reversed} reversed cells");
     }
 }

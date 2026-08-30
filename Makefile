@@ -11,4 +11,4 @@ install: ## Link this repo as a herdr plugin
 	herdr plugin link .
 
 uninstall: ## Unlink the herdr plugin
-	herdr plugin unlink shaozk.sync-panes
+	herdr plugin unlink shaozk.herdr-shadow-pane

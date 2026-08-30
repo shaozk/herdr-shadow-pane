@@ -1,4 +1,4 @@
-# sync-panes — broadcast your keystrokes to multiple herdr panes
+# herdr-shadow-pane — broadcast your keystrokes as a shadow across herdr panes
 #
 # tmux-style synchronize-panes for herdr, as a plugin.
 # The `sync` action is a thin launcher: it opens the console as a
@@ -6,15 +6,15 @@
 # entrypoint; herdr tears the pane down when the process exits.
 #
 # Local development:
-#   cargo build --release && mkdir -p bin && cp target/release/sync-panes bin/
+#   cargo build --release && mkdir -p bin && cp target/release/herdr-shadow-pane bin/
 #   herdr plugin link .
 #
 # Install from GitHub:
-#   herdr plugin install <owner>/herdr-sync-panes
+#   herdr plugin install <owner>/herdr-shadow-pane
 
-id = "shaozk.sync-panes"
-name = "Sync Panes"
-version = "0.7.0"
+id = "shaozk.herdr-shadow-pane"
+name = "Shadow Pane"
+version = "0.7.1"
 min_herdr_version = "0.8.0"
 description = "tmux-style synchronize-panes: broadcast keystrokes to all other panes of the current tab."
 platforms = ["linux", "macos"]
@@ -25,13 +25,13 @@ command = ["sh", "scripts/build.sh"]
 
 [[actions]]
 id = "sync"
-title = "Sync Panes: broadcast keystrokes"
+title = "Shadow Pane: broadcast keystrokes"
 platforms = ["linux", "macos"]
-command = ["./bin/sync-panes", "launch"]
+command = ["./bin/herdr-shadow-pane", "launch"]
 
 [[panes]]
 id = "console"
-title = "Sync Panes"
+title = "Shadow Pane"
 placement = "overlay"
 platforms = ["linux", "macos"]
-command = ["./bin/sync-panes"]
+command = ["./bin/herdr-shadow-pane"]

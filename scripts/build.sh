@@ -3,4 +3,4 @@ set -eu
 cd "$(dirname "$0")/.."
 cargo build --release
 mkdir -p bin
-cp target/release/sync-panes bin/sync-panes
+cp target/release/herdr-shadow-pane bin/herdr-shadow-pane

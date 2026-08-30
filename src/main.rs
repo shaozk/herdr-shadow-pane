@@ -10,12 +10,12 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-const PLUGIN_ID: &str = "shaozk.sync-panes";
+const PLUGIN_ID: &str = "shaozk.herdr-shadow-pane";
 
 fn main() {
     if let Err(err) = run() {
         let _ = restore_terminal();
-        eprintln!("sync-panes: {err:#}");
+        eprintln!("herdr-shadow-pane: {err:#}");
         std::process::exit(1);
     }
 }
@@ -24,12 +24,12 @@ fn run() -> Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("launch") => return launch(),
         Some("--version" | "version") => {
-            println!("sync-panes {}", env!("CARGO_PKG_VERSION"));
+            println!("herdr-shadow-pane {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         _ => {}
     }
-    if std::env::var_os("SYNC_PANES_DEBUG_LIST").is_some() {
+    if std::env::var_os("SHADOW_PANE_DEBUG_LIST").is_some() {
         return debug_list();
     }
 

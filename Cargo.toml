@@ -1,6 +1,6 @@
 [package]
-name = "sync-panes"
-version = "0.7.0"
+name = "herdr-shadow-pane"
+version = "0.7.1"
 edition = "2024"
 
 [dependencies]
