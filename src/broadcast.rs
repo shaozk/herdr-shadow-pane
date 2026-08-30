@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::Paragraph,
     Frame, Terminal,
 };
 use std::borrow::Cow;
@@ -16,7 +16,6 @@ use crate::herdr::{self, PaneInfo};
 use crate::layout;
 
 const READ_LINES: usize = 14;
-const CHROME_ROWS: u16 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SEND_REFRESH_DELAY: Duration = Duration::from_millis(120);
 
@@ -62,7 +61,7 @@ pub fn run(
         if Instant::now() >= next_poll {
             let read_lines = terminal
                 .size()
-                .map(|s| (s.height.saturating_sub(CHROME_ROWS)).max(1) as usize)
+                .map(|s| s.height.max(1) as usize)
                 .unwrap_or(READ_LINES);
             refresh(&mut targets, read_lines);
             cursor_on = !cursor_on;
@@ -236,38 +235,44 @@ fn draw(
     cursor_on: bool,
 ) {
     let area = f.area();
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);
+    let constraints: Vec<Constraint> = match notice {
+        Some(_) => vec![Constraint::Length(1), Constraint::Min(1)],
+        None => vec![Constraint::Min(1)],
+    };
+    let rows = Layout::vertical(constraints).split(area);
+    let body = if notice.is_some() { rows[1] } else { rows[0] };
 
-    let live = targets.iter().filter(|t| !t.dead).count();
-    let mut status = format!(
-        " live {}/{} · sent {} · enter ⏎ ⌫ esc ^c broadcast · ^q quit",
-        live,
-        targets.len(),
-        sent
-    );
     if let Some(n) = notice {
-        status.push_str("  ·  ");
-        status.push_str(n);
+        let live = targets.iter().filter(|t| !t.dead).count();
+        let status = format!(
+            " live {live}/{} · sent {sent} · {n} · ^q quit",
+            targets.len()
+        );
+        f.render_widget(Paragraph::new(Line::from(status).dim()), rows[0]);
     }
-    f.render_widget(Paragraph::new(Line::from(status).dim()), rows[0]);
 
-    let cells = Layout::horizontal(targets.iter().map(|_| Constraint::Fill(1))).split(rows[1]);
-    for (t, cell) in targets.iter().zip(cells.iter()) {
-        let (title, body) = if t.dead {
-            (
-                Line::from(format!(" {} ✕ dead ", t.label)).red(),
-                Paragraph::new(Line::from(" pane closed or unreachable ").red()),
-            )
+    let mut horizontal: Vec<Constraint> = Vec::new();
+    for i in 0..targets.len() {
+        if i > 0 {
+            horizontal.push(Constraint::Length(1));
+        }
+        horizontal.push(Constraint::Fill(1));
+    }
+    let cells = Layout::horizontal(horizontal).split(body);
+    for (i, t) in targets.iter().enumerate() {
+        let cell = cells[i * 2];
+        let body = if t.dead {
+            Paragraph::new(Line::from(format!(" ✕ {} dead — pane closed or unreachable ", t.label)).red())
         } else {
-            let rows = cell.height.saturating_sub(2) as usize;
+            let rows = cell.height as usize;
             let shown = &t.mirror[t.mirror.len().saturating_sub(rows)..];
-            (
-                Line::from(format!(" {} ● ", t.label)).green(),
-                Paragraph::new(with_cursor(shown, cursor_on)),
-            )
+            Paragraph::new(with_cursor(shown, cursor_on))
         };
-        let block = Block::bordered().title(title);
-        f.render_widget(body.block(block), *cell);
+        f.render_widget(body, cell);
+        if let Some(sep) = cells.get(i * 2 + 1) {
+            let line = vec![Line::from("│"); sep.height as usize];
+            f.render_widget(Paragraph::new(line).dim(), *sep);
+        }
     }
 }
 
