@@ -1,108 +1,97 @@
-use std::collections::HashMap;
-
-use anyhow::Result;
-
 use crate::herdr::{self, Rect};
 
-const MAX_STEPS_PER_PANE: usize = 10;
-const TOLERANCE_CELLS: i32 = 2;
-const MIN_STEP: f64 = 0.02;
-const MAX_STEP: f64 = 0.4;
-
-#[derive(Clone, Copy)]
-struct Axis {
-    size: i32,
-    area: i32,
+pub fn capture(probe_pane: &str) -> Snapshot {
+    herdr::tab_layout(probe_pane)
+        .map(|l| Snapshot::capture(&l))
+        .unwrap_or_default()
 }
 
-fn step_axis(
-    pane_id: &str,
-    axis: &'static str,
-    low_dir: &'static str,
-    high_dir: &'static str,
-    goal: i32,
-    cur: Axis,
-    signs: &mut HashMap<(String, &'static str), &'static str>,
-) -> Result<bool> {
-    let delta = goal - cur.size;
-    if delta.abs() <= TOLERANCE_CELLS || cur.area <= 0 {
-        return Ok(false);
-    }
-    let ratio_delta = (delta as f64 / cur.area as f64)
-        .clamp(-MAX_STEP, MAX_STEP)
-        .max(if delta > 0 { MIN_STEP } else { -MIN_STEP });
-    let key = (pane_id.to_string(), axis);
-    let dir = *signs.entry(key.clone()).or_insert(high_dir);
-    let mut moved = herdr::resize_pane(pane_id, dir, ratio_delta.abs())?;
-    let layout = herdr::tab_layout(pane_id)?;
-    let new_size = layout
-        .panes
-        .iter()
-        .find(|(id, _)| id == pane_id)
-        .map(|(_, r)| if axis == "x" { r.width } else { r.height })
-        .unwrap_or(cur.size);
-    let improved = (goal - new_size).abs() < delta.abs();
-    if !improved {
-        let flipped = if dir == low_dir { high_dir } else { low_dir };
-        signs.insert(key, flipped);
-        if moved {
-            herdr::resize_pane(pane_id, flipped, ratio_delta.abs())?;
-            moved = true;
+#[derive(Default)]
+pub struct Snapshot {
+    splits: Vec<(String, String, f64, Rect)>,
+}
+
+impl Snapshot {
+    fn capture(layout: &herdr::TabLayout) -> Self {
+        Snapshot {
+            splits: layout
+                .splits
+                .iter()
+                .map(|s| (s.id.clone(), s.direction.clone(), s.ratio, s.rect))
+                .collect(),
         }
     }
-    Ok(moved)
 }
 
-fn drive(pane_id: &str, goal: Rect, signs: &mut HashMap<(String, &'static str), &'static str>) -> Result<()> {
-    for _ in 0..MAX_STEPS_PER_PANE {
-        let layout = herdr::tab_layout(pane_id)?;
-        let Some((_, rect)) = layout.panes.iter().find(|(id, _)| id == pane_id) else {
-            return Ok(());
+pub fn exit_restore(snapshot: &Snapshot, probes: &[&str]) {
+    if snapshot.splits.is_empty() {
+        return;
+    }
+    for _ in 0..4 {
+        let Some(cur) = probes.iter().find_map(|p| herdr::tab_layout(p).ok()) else {
+            return;
         };
-        let cur = *rect;
-        let moved_x = step_axis(
-            pane_id,
-            "x",
-            "left",
-            "right",
-            goal.width,
-            Axis { size: cur.width, area: layout.area.width },
-            signs,
-        )?;
-        let moved_y = step_axis(
-            pane_id,
-            "y",
-            "up",
-            "down",
-            goal.height,
-            Axis { size: cur.height, area: layout.area.height },
-            signs,
-        )?;
-        if !moved_x && !moved_y {
-            return Ok(());
+        let mut pending = false;
+        for (id, _, ratio, _) in &snapshot.splits {
+            let Some(c) = cur.splits.iter().find(|s| &s.id == id) else {
+                continue;
+            };
+            let axis = if c.direction == "right" { c.rect.width } else { c.rect.height };
+            if axis <= 0 {
+                continue;
+            }
+            let eps = 1.0 / axis as f64;
+            let delta = *ratio - c.ratio;
+            if delta.abs() <= eps {
+                continue;
+            }
+            if let Some(pane) = neighbor(&cur, c, delta > 0.0) {
+                let dir = if delta > 0.0 {
+                    c.direction.clone()
+                } else {
+                    match c.direction.as_str() {
+                        "right" => "left".to_string(),
+                        _ => "up".to_string(),
+                    }
+                };
+                if herdr::resize_pane(&pane, &dir, delta.abs()).unwrap_or(false) {
+                    pending = true;
+                }
+            }
+        }
+        if !pending {
+            return;
         }
     }
-    Ok(())
 }
 
-pub fn drive_all(goals: &[(String, Rect)]) -> Result<()> {
-    let mut signs = HashMap::new();
-    for (pane_id, goal) in goals {
-        drive(pane_id, *goal, &mut signs)?;
-    }
-    Ok(())
-}
-
-pub fn rect_of(layout: &herdr::TabLayout, pane_id: &str) -> Option<Rect> {
-    layout.panes.iter().find(|(id, _)| id == pane_id).map(|(_, r)| *r)
-}
-
-pub fn aligned(layout: &herdr::TabLayout, pane_id: &str, goal: Rect) -> bool {
-    match rect_of(layout, pane_id) {
-        Some(r) => {
-            (r.width - goal.width).abs() <= TOLERANCE_CELLS
-                && (r.height - goal.height).abs() <= TOLERANCE_CELLS
-        }
-        None => false,
-    }
+fn neighbor(layout: &herdr::TabLayout, split: &herdr::Split, low_side: bool) -> Option<String> {
+    let (bx, by) = match split.direction.as_str() {
+        "right" => (
+            split.rect.x + (split.rect.width as f64 * split.ratio).round() as i32,
+            split.rect.y,
+        ),
+        _ => (
+            split.rect.x,
+            split.rect.y + (split.rect.height as f64 * split.ratio).round() as i32,
+        ),
+    };
+    layout.panes.iter().find_map(|(id, r)| {
+        let inside = r.x >= split.rect.x
+            && r.y >= split.rect.y
+            && r.x + r.width <= split.rect.x + split.rect.width
+            && r.y + r.height <= split.rect.y + split.rect.height;
+        let edge = if split.direction == "right" {
+            if low_side {
+                r.x + r.width == bx
+            } else {
+                r.x == bx
+            }
+        } else if low_side {
+            r.y + r.height == by
+        } else {
+            r.y == by
+        };
+        (inside && edge).then(|| id.clone())
+    })
 }

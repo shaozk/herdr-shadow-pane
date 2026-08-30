@@ -47,7 +47,7 @@ description = "sync-panes: broadcast keystrokes"
 - 输入通道：可打印字符走 `herdr pane send-text`，控制键走 `herdr pane send-keys`；发送并发扇出到所有存活目标。
 - 输出镜像：每 500ms 对每个目标轮询 `herdr pane read --source visible --format ansi`，行数按控制台高度动态取值（终端高度 − 头部 3 行 − 边框 2 行），完整覆盖目标可见屏幕；以 ansi-to-tui 解析后原样渲染，目标窗格的原始样式（前景/背景/真彩色、加粗、反显等）与终端保持一致——目标里跑着 opencode，镜像就是 opencode 的样子；镜像超出分格高度时底端对齐（只显示最后 N 行）；轮询节拍同时驱动影子光标 1Hz 闪烁。
 - 影子光标：无法在目标窗格自身终端内绘制（其前台进程拥有屏幕），因此在控制台的每个目标镜像格中以反显空格渲染块状光标；目标窗格真实终端里，其原生光标会随广播输入自然移动。
-- 尺寸对齐：进入广播时记录各目标窗格原始尺寸，通过 `herdr` 的 tab-layout / pane resize 迭代把所有目标对齐到主窗格（触发 action 时的聚焦窗格，launcher 经 `--env SYNC_PANES_MASTER` 自动传入）大小，保证镜像一致；退出时恢复原尺寸，对齐结果以 notice 提示（全对齐 / best-effort / 失败）。
+- 布局保持：进入与广播全程不改动 pane 布局（不对齐尺寸）；进入时快照 tab 全部 split（id/direction/ratio），退出时逐 split 精确还原 ratio（一步到位，亚单元格容差）作为兜底，保证广播前后布局一致。
 - 目标窗格中途关闭会被标记 `✕ dead` 并停发；全部失效时自动退出。
 - 广播语义为逐字符直通，不做 bracketed paste；向 agent TUI 广播时其界面对渐进输入的反应（如补全跳动）属预期行为。
 
@@ -61,11 +61,12 @@ make install    # herdr plugin link .
 make uninstall  # herdr plugin unlink shaozk.sync-panes
 ```
 
-调试：在任意窗格设置 `SYNC_PANES_DEBUG_LIST=1` 后运行 `bin/sync-panes`，打印解析到的 tab 上下文与窗格列表后退出；设置 `SYNC_PANES_DEBUG_ALIGN=<pane_id>` 则以该窗格为主窗格单跑一次尺寸对齐并打印前后尺寸。
+调试：在任意窗格设置 `SYNC_PANES_DEBUG_LIST=1` 后运行 `bin/sync-panes`，打印解析到的 tab 上下文与窗格列表后退出。
 
 ## Roadmap（v1 明确不做）
 
 - workspace / 跨 tab 作用域
+- 尺寸对齐（把目标窗格拉到主窗格大小）
 - 逐行（Enter 提交）广播模式
 - bracketed paste 支持
 - 全量键位映射（方向键、Tab、Home/End、PgUp/PgDn、Ctrl+字母全表、F1–F12）

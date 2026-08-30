@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::herdr::{self, PaneInfo, Rect};
+use crate::herdr::{self, PaneInfo};
 use crate::layout;
 
 const READ_LINES: usize = 14;
@@ -52,7 +52,12 @@ pub fn run(
     let mut cursor_on = true;
     let mut next_poll = Instant::now();
 
-    let originals = capture_and_align(&targets, &mut notice);
+    let master = std::env::var("SYNC_PANES_MASTER").ok();
+    let probe = master
+        .clone()
+        .or_else(|| targets.first().map(|t| t.pane_id.clone()))
+        .unwrap_or_default();
+    let snapshot = layout::capture(&probe);
 
     loop {
         if Instant::now() >= next_poll {
@@ -119,50 +124,15 @@ pub fn run(
         }
     }
 
-    if !originals.is_empty() {
-        let _ = layout::drive_all(&originals);
+    let mut probes: Vec<&str> = Vec::new();
+    if let Some(m) = master.as_deref() {
+        probes.push(m);
     }
+    for t in &targets {
+        probes.push(t.pane_id.as_str());
+    }
+    layout::exit_restore(&snapshot, &probes);
     Ok(())
-}
-
-fn capture_and_align(selected: &[Target], notice: &mut Option<String>) -> Vec<(String, Rect)> {
-    let Some(master) = std::env::var("SYNC_PANES_MASTER").ok() else {
-        return Vec::new();
-    };
-    let Ok(layout0) = herdr::tab_layout(&master) else {
-        return Vec::new();
-    };
-    let originals: Vec<(String, Rect)> = selected
-        .iter()
-        .filter_map(|t| layout::rect_of(&layout0, &t.pane_id).map(|r| (t.pane_id.clone(), r)))
-        .collect();
-    let Some(goal) = layout::rect_of(&layout0, &master) else {
-        return originals;
-    };
-    let goals: Vec<(String, Rect)> = originals.iter().map(|(id, _)| (id.clone(), goal)).collect();
-    match layout::drive_all(&goals) {
-        Ok(_) => {
-            let aligned = herdr::tab_layout(&master)
-                .map(|l| {
-                    goals
-                        .iter()
-                        .filter(|(id, g)| layout::aligned(&l, id, *g))
-                        .count()
-                })
-                .unwrap_or(0);
-            let total = goals.len();
-            *notice = Some(if aligned == total {
-                format!(
-                    "shadow on — {total} pane{s} matched master size",
-                    s = if total == 1 { "" } else { "s" }
-                )
-            } else {
-                format!("shadow on — size best-effort {aligned}/{total}")
-            });
-        }
-        Err(_) => *notice = Some("shadow on — size alignment failed".to_string()),
-    }
-    originals
 }
 
 fn send_all(targets: &mut [Target], payload: Payload) {

@@ -25,16 +25,26 @@ struct PaneCurrent {
     result: PaneCurrentInner,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
+    pub x: i32,
+    pub y: i32,
     pub width: i32,
     pub height: i32,
 }
 
 #[derive(Clone, Debug)]
+pub struct Split {
+    pub id: String,
+    pub direction: String,
+    pub ratio: f64,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug)]
 pub struct TabLayout {
-    pub area: Rect,
     pub panes: Vec<(String, Rect)>,
+    pub splits: Vec<Split>,
 }
 
 #[derive(Deserialize)]
@@ -49,14 +59,27 @@ struct PaneLayoutInner {
 
 #[derive(Deserialize)]
 struct PaneLayoutFields {
-    area: RectFields,
     panes: Vec<PaneRectFields>,
+    #[serde(default)]
+    splits: Vec<SplitFields>,
 }
 
 #[derive(Deserialize)]
 struct RectFields {
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
     width: i32,
     height: i32,
+}
+
+#[derive(Deserialize)]
+struct SplitFields {
+    id: String,
+    direction: String,
+    ratio: f64,
+    rect: RectFields,
 }
 
 #[derive(Deserialize)]
@@ -82,7 +105,7 @@ struct PaneResizeFields {
 
 impl From<RectFields> for Rect {
     fn from(f: RectFields) -> Self {
-        Rect { width: f.width, height: f.height }
+        Rect { x: f.x, y: f.y, width: f.width, height: f.height }
     }
 }
 
@@ -107,8 +130,6 @@ struct PaneFields {
     tab_id: String,
     workspace_id: String,
     #[serde(default)]
-    focused: bool,
-    #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
     agent_status: Option<String>,
@@ -116,23 +137,6 @@ struct PaneFields {
     terminal_title_stripped: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceList {
-    result: WorkspaceListInner,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceListInner {
-    workspaces: Vec<WorkspaceFields>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceFields {
-    workspace_id: String,
-    #[serde(default)]
-    focused: bool,
 }
 
 fn run_json(args: &[&str]) -> Result<serde_json::Value> {
@@ -210,37 +214,25 @@ pub fn send_key(pane_id: &str, key: &str) -> Result<()> {
     spawn(&["pane", "send-keys", pane_id, key])
 }
 
-pub fn focused_pane_id() -> Result<String> {
-    let value = run_json(&["workspace", "list"])?;
-    let parsed: WorkspaceList =
-        serde_json::from_value(value).context("unexpected workspace list response")?;
-    let ws = parsed
-        .result
-        .workspaces
-        .into_iter()
-        .find(|w| w.focused)
-        .context("no focused workspace")?;
-    let value = run_json(&["pane", "list", "--workspace", &ws.workspace_id])?;
-    let parsed: PaneList = serde_json::from_value(value).context("unexpected pane list response")?;
-    parsed
-        .result
-        .panes
-        .into_iter()
-        .find(|p| p.focused)
-        .map(|p| p.pane_id)
-        .context("no focused pane")
-}
-
 pub fn tab_layout(any_pane_in_tab: &str) -> Result<TabLayout> {
     let value = run_json(&["pane", "layout", "--pane", any_pane_in_tab])?;
     let parsed: PaneLayoutResp = serde_json::from_value(value).context("unexpected pane layout response")?;
     let layout = parsed.result.layout;
     Ok(TabLayout {
-        area: layout.area.into(),
         panes: layout
             .panes
             .into_iter()
             .map(|p| (p.pane_id, p.rect.into()))
+            .collect(),
+        splits: layout
+            .splits
+            .into_iter()
+            .map(|s| Split {
+                id: s.id,
+                direction: s.direction,
+                ratio: s.ratio,
+                rect: s.rect.into(),
+            })
             .collect(),
     })
 }
