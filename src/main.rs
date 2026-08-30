@@ -1,7 +1,6 @@
 mod broadcast;
 mod herdr;
 mod layout;
-mod picker;
 
 use anyhow::{bail, Context as _, Result};
 use crossterm::{
@@ -36,6 +35,10 @@ fn run() -> Result<()> {
 
     let ctx = herdr::resolve_context()?;
     let panes = herdr::list_tab_panes(&ctx)?;
+    let targets: Vec<_> = panes.into_iter().filter(|p| !p.is_self).collect();
+    if targets.is_empty() {
+        bail!("no other panes in tab {} — nothing to broadcast to", ctx.tab_id);
+    }
 
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
@@ -44,16 +47,7 @@ fn run() -> Result<()> {
     execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture)
         .context("failed to enter alternate screen")?;
 
-    let result = (|| {
-        let selected = picker::run(&mut terminal, &ctx, panes)?;
-        match selected {
-            Some(targets) if !targets.is_empty() => {
-                broadcast::run(&mut terminal, targets)?;
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    })();
+    let result = broadcast::run(&mut terminal, targets);
 
     restore_terminal()?;
     result

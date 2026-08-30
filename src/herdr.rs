@@ -16,7 +16,6 @@ pub struct PaneInfo {
     pub agent: Option<String>,
     pub agent_status: Option<String>,
     pub title: Option<String>,
-    pub cwd: Option<String>,
     pub is_self: bool,
 }
 
@@ -135,8 +134,6 @@ struct PaneFields {
     agent_status: Option<String>,
     #[serde(default)]
     terminal_title_stripped: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
 }
 
 fn run_json(args: &[&str]) -> Result<serde_json::Value> {
@@ -188,7 +185,6 @@ pub fn list_tab_panes(ctx: &Context) -> Result<Vec<PaneInfo>> {
             agent: p.agent,
             agent_status: p.agent_status,
             title: p.terminal_title_stripped,
-            cwd: p.cwd,
         })
         .collect();
     panes.sort_by_key(|p| p.is_self);

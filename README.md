@@ -1,12 +1,12 @@
 # sync-panes
 
-tmux 式 `synchronize-panes`，以 herdr 插件形式实现：把你的击键逐字符实时广播到当前 tab 中选定的多个窗格。
+tmux 式 `synchronize-panes`，以 herdr 插件形式实现：把你的击键逐字符实时广播到当前 tab 的全部其他窗格。
 
 ## 工作方式
 
 0. 已绑定快捷键 `prefix+shift+o`（见下方"快捷键"），或从 herdr action 菜单触发 **Sync Panes: broadcast keystrokes**（或 `herdr plugin action invoke shaozk.sync-panes.sync`）。
 1. action 只是一个薄启动器：调用 `herdr plugin pane open` 把控制台作为 overlay 窗格打开。
-2. 控制台 TUI 首屏列出当前 tab 的全部窗格（自身窗格除外），空格勾选、回车进入广播页。
+2. 控制台 TUI 直接进入广播页，目标为当前 tab 的全部其他窗格（无需勾选）。
 3. 广播页里你的每次击键都会实时转发给所有目标窗格；下方分格实时镜像每个目标的可见输出，并各自显示一个闪烁的块状影子光标（影分身），位置追踪该窗格镜像最后一行非空字符之后——即下一个广播字符的落点。
 4. `Ctrl+Q` 退出，herdr 自动回收 overlay 窗格。
 
@@ -25,14 +25,6 @@ description = "sync-panes: broadcast keystrokes"
 改完执行 `herdr server reload-config` 或按 `prefix+shift+r` 生效。
 
 ## 键位
-
-| 选择页 | 行为 |
-| --- | --- |
-| `↑/↓` / `j/k` | 移动光标 |
-| `space` | 勾选/取消 |
-| `a` | 全选/全不选 |
-| `enter` | 开始广播 |
-| `esc` / `q` / `ctrl+q` | 退出 |
 
 | 广播页 | 行为 |
 | --- | --- |
@@ -70,4 +62,3 @@ make uninstall  # herdr plugin unlink shaozk.sync-panes
 - 逐行（Enter 提交）广播模式
 - bracketed paste 支持
 - 全量键位映射（方向键、Tab、Home/End、PgUp/PgDn、Ctrl+字母全表、F1–F12）
-- 目标选择持久化
