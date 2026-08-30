@@ -16,7 +16,7 @@ use crate::herdr::{self, PaneInfo};
 use crate::layout;
 
 const READ_LINES: usize = 14;
-const CHROME_ROWS: u16 = 5;
+const CHROME_ROWS: u16 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SEND_REFRESH_DELAY: Duration = Duration::from_millis(120);
 
@@ -46,7 +46,6 @@ pub fn run(
             mirror: Vec::new(),
         })
         .collect();
-    let mut input = String::new();
     let mut sent: usize = 0;
     let mut notice: Option<String> = None;
     let mut cursor_on = true;
@@ -70,7 +69,7 @@ pub fn run(
             next_poll = Instant::now() + POLL_INTERVAL;
         }
         let timeout = next_poll.saturating_duration_since(Instant::now());
-        terminal.draw(|f| draw(f, &targets, &input, sent, &notice, cursor_on))?;
+        terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
@@ -82,7 +81,6 @@ pub fn run(
                     (KeyCode::Char('q'), KeyModifiers::CONTROL) => break,
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         send_all(&mut targets, Payload::Key("ctrl+c"));
-                        input.clear();
                         next_poll = Instant::now() + SEND_REFRESH_DELAY;
                     }
                     (KeyCode::Esc, _) => {
@@ -91,18 +89,15 @@ pub fn run(
                     }
                     (KeyCode::Enter, _) => {
                         send_all(&mut targets, Payload::Key("enter"));
-                        input.clear();
                         next_poll = Instant::now() + SEND_REFRESH_DELAY;
                     }
                     (KeyCode::Backspace, _) => {
                         send_all(&mut targets, Payload::Key("backspace"));
-                        input.pop();
                         next_poll = Instant::now() + SEND_REFRESH_DELAY;
                     }
                     (KeyCode::Char(ch), KeyModifiers::NONE) | (KeyCode::Char(ch), KeyModifiers::SHIFT) => {
                         let mut buf = [0u8; 4];
                         send_all(&mut targets, Payload::Text(ch.encode_utf8(&mut buf)));
-                        input.push(ch);
                         next_poll = Instant::now() + SEND_REFRESH_DELAY;
                     }
                     (KeyCode::Char(ch), KeyModifiers::CONTROL) => {
@@ -118,7 +113,7 @@ pub fn run(
 
         if !targets.is_empty() && targets.iter().all(|t| t.dead) {
             notice = Some("all targets are gone — exiting".to_string());
-            terminal.draw(|f| draw(f, &targets, &input, sent, &notice, cursor_on))?;
+            terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
             thread::sleep(Duration::from_millis(1200));
             break;
         }
@@ -236,13 +231,12 @@ fn label_of(info: &PaneInfo) -> String {
 fn draw(
     f: &mut Frame,
     targets: &[Target],
-    input: &str,
     sent: usize,
     notice: &Option<String>,
     cursor_on: bool,
 ) {
     let area = f.area();
-    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).split(area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);
 
     let live = targets.iter().filter(|t| !t.dead).count();
     let mut status = format!(
@@ -255,12 +249,7 @@ fn draw(
         status.push_str("  ·  ");
         status.push_str(n);
     }
-    let header = Paragraph::new(vec![
-        Line::from(format!(" > {input}▏")),
-        Line::from(status).dim(),
-    ])
-    .block(Block::bordered().title(" sync-panes — broadcasting ".bold()));
-    f.render_widget(header, rows[0]);
+    f.render_widget(Paragraph::new(Line::from(status).dim()), rows[0]);
 
     let cells = Layout::horizontal(targets.iter().map(|_| Constraint::Fill(1))).split(rows[1]);
     for (t, cell) in targets.iter().zip(cells.iter()) {

@@ -37,7 +37,7 @@ description = "sync-panes: broadcast keystrokes"
 
 - Rust + crossterm + ratatui，无运行时依赖。
 - 输入通道：可打印字符走 `herdr pane send-text`，控制键走 `herdr pane send-keys`；发送并发扇出到所有存活目标。
-- 输出镜像：每 500ms 对每个目标轮询 `herdr pane read --source visible --format ansi`，行数按控制台高度动态取值（终端高度 − 头部 3 行 − 边框 2 行），完整覆盖目标可见屏幕；以 ansi-to-tui 解析后原样渲染，目标窗格的原始样式（前景/背景/真彩色、加粗、反显等）与终端保持一致——目标里跑着 opencode，镜像就是 opencode 的样子；镜像超出分格高度时底端对齐（只显示最后 N 行）；轮询节拍同时驱动影子光标 1Hz 闪烁。
+- 输出镜像：每 500ms 对每个目标轮询 `herdr pane read --source visible --format ansi`，行数按控制台高度动态取值（终端高度 − 状态行 1 行 − 边框 2 行），完整覆盖目标可见屏幕；以 ansi-to-tui 解析后原样渲染，目标窗格的原始样式（前景/背景/真彩色、加粗、反显等）与终端保持一致——目标里跑着 opencode，镜像就是 opencode 的样子；镜像超出分格高度时底端对齐（只显示最后 N 行）；轮询节拍同时驱动影子光标 1Hz 闪烁。
 - 影子光标：无法在目标窗格自身终端内绘制（其前台进程拥有屏幕），因此在控制台的每个目标镜像格中以反显空格渲染块状光标；目标窗格真实终端里，其原生光标会随广播输入自然移动。
 - 布局保持：进入与广播全程不改动 pane 布局（不对齐尺寸）；进入时快照 tab 全部 split（id/direction/ratio），退出时逐 split 精确还原 ratio（一步到位，亚单元格容差）作为兜底，保证广播前后布局一致。
 - 目标窗格中途关闭会被标记 `✕ dead` 并停发；全部失效时自动退出。
