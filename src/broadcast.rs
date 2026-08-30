@@ -165,7 +165,8 @@ fn refresh(targets: &mut [Target], lines: usize) {
 }
 
 fn parse_ansi(raw: &str) -> Vec<Line<'static>> {
-    match raw.into_text() {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "");
+    match normalized.as_str().into_text() {
         Ok(text) => text
             .lines
             .into_iter()
@@ -179,7 +180,7 @@ fn parse_ansi(raw: &str) -> Vec<Line<'static>> {
                 )
             })
             .collect(),
-        Err(_) => strip_ansi(raw)
+        Err(_) => strip_ansi(&normalized)
             .lines()
             .map(|l| Line::from(l.to_string()))
             .collect(),
@@ -312,4 +313,60 @@ fn with_cursor(lines: &[Line<'static>], cursor_on: bool) -> Vec<Line<'static>> {
         l.spans = spans;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn parse_ansi_keeps_lines_separate_under_cr() {
+        let raw = "one\r\ntwo\r\nthree\r\n";
+        assert_eq!(texts(&parse_ansi(raw)), vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn parse_ansi_real_stream_shape() {
+        let raw = "seq 1 40\r\nhost# seq 1 40\r\n1\r\n2\r\n3\r\nhost# ";
+        assert_eq!(
+            texts(&parse_ansi(raw)),
+            vec!["seq 1 40", "host# seq 1 40", "1", "2", "3", "host# "]
+        );
+    }
+
+    #[test]
+    fn shrinking_mirror_clears_old_content() {
+        use ratatui::{backend::TestBackend, Terminal as TestTerminal};
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = TestTerminal::new(backend).unwrap();
+        let full = parse_ansi(&format!("{}\r\n", (1..=8).map(|i| format!("OLDLINE-{i}")).collect::<Vec<_>>().join("\r\n")));
+        let mut targets = vec![Target {
+            pane_id: "t".into(),
+            label: "t".into(),
+            dead: false,
+            mirror: full,
+        }];
+        terminal
+            .draw(|f| draw(f, &targets, 3, &None, true))
+            .unwrap();
+        targets[0].mirror = parse_ansi("host# ");
+        terminal
+            .draw(|f| draw(f, &targets, 4, &None, true))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(!screen.contains("OLDLINE"), "stale mirror content: {screen:?}");
+    }
 }
