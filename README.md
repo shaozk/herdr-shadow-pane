@@ -47,6 +47,7 @@ description = "sync-panes: broadcast keystrokes"
 - 输入通道：可打印字符走 `herdr pane send-text`，控制键走 `herdr pane send-keys`；发送并发扇出到所有存活目标。
 - 输出镜像：每 500ms 对每个目标轮询 `herdr pane read --source visible --lines 14 --format ansi`，以 ansi-to-tui 解析后原样渲染，目标窗格的原始样式（前景/背景/真彩色、加粗、反显等）与终端保持一致——目标里跑着 opencode，镜像就是 opencode 的样子；轮询节拍同时驱动影子光标 1Hz 闪烁。
 - 影子光标：无法在目标窗格自身终端内绘制（其前台进程拥有屏幕），因此在控制台的每个目标镜像格中以反显空格渲染块状光标；目标窗格真实终端里，其原生光标会随广播输入自然移动。
+- 尺寸对齐：进入广播时记录各目标窗格原始尺寸，通过 `herdr` 的 tab-layout / pane resize 迭代把所有目标对齐到主窗格（触发 action 时的聚焦窗格，launcher 经 `--env SYNC_PANES_MASTER` 自动传入）大小，保证镜像一致；退出时恢复原尺寸，对齐结果以 notice 提示（全对齐 / best-effort / 失败）。
 - 目标窗格中途关闭会被标记 `✕ dead` 并停发；全部失效时自动退出。
 - 广播语义为逐字符直通，不做 bracketed paste；向 agent TUI 广播时其界面对渐进输入的反应（如补全跳动）属预期行为。
 
@@ -55,13 +56,12 @@ description = "sync-panes: broadcast keystrokes"
 本地开发（本仓库即插件根目录）：
 
 ```sh
-sh scripts/build.sh      # cargo build --release 并拷贝到 bin/
-herdr plugin link .
+make build      # cargo build --release 并拷贝到 bin/（即 scripts/build.sh）
+make install    # herdr plugin link .
+make uninstall  # herdr plugin unlink shaozk.sync-panes
 ```
 
-卸载：`herdr plugin unlink shaozk.sync-panes`。
-
-调试：在任意窗格设置 `SYNC_PANES_DEBUG_LIST=1` 后运行 `bin/sync-panes`，打印解析到的 tab 上下文与窗格列表后退出。
+调试：在任意窗格设置 `SYNC_PANES_DEBUG_LIST=1` 后运行 `bin/sync-panes`，打印解析到的 tab 上下文与窗格列表后退出；设置 `SYNC_PANES_DEBUG_ALIGN=<pane_id>` 则以该窗格为主窗格单跑一次尺寸对齐并打印前后尺寸。
 
 ## Roadmap（v1 明确不做）
 
