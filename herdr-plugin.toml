@@ -4,6 +4,8 @@
 # The `sync` action is a thin launcher: it opens the console as a
 # herdr-managed overlay pane. The real TUI runs as the `console` pane
 # entrypoint; herdr tears the pane down when the process exits.
+# herdr spawns plugin commands with CWD = plugin root, so relative
+# `./bin/...` paths resolve; bare command names would not.
 #
 # Local development:
 #   cargo build --release && mkdir -p bin && cp target/release/herdr-shadow-pane bin/

@@ -43,11 +43,27 @@ description = "herdr-shadow-pane: broadcast keystrokes"
 - 目标窗格中途关闭会被标记 `✕ dead` 并停发；全部失效时自动退出。
 - 广播语义为逐字符直通，不做 bracketed paste；向 agent TUI 广播时其界面对渐进输入的反应（如补全跳动）属预期行为。
 
+## 示例
+
+镜像输出样例：
+
+- 中文：[examples/mirror.zh.md](examples/mirror.zh.md)
+- English: [examples/mirror.en.md](examples/mirror.en.md)
+
 ## 开发与安装
+
+要求 `herdr ≥ 0.8.0`。
+
+从 GitHub 安装：
+
+```sh
+herdr plugin install <owner>/herdr-shadow-pane
+```
 
 本地开发（本仓库即插件根目录）：
 
 ```sh
+make help       # 列出全部 make 目标
 make build      # cargo build --release 并拷贝到 bin/（即 scripts/build.sh）
 make install    # herdr plugin link .
 make uninstall  # herdr plugin unlink shaozk.herdr-shadow-pane
