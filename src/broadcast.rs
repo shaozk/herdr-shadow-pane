@@ -12,6 +12,7 @@ use std::borrow::Cow;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::herdr::{self, PaneInfo};
 use crate::layout;
@@ -21,6 +22,7 @@ const READ_TICK: Duration = Duration::from_millis(50);
 const RENDER_TICK: Duration = Duration::from_millis(30);
 const BLINK_TICKS: u32 = 16;
 const INPUT_BATCH_WINDOW: Duration = Duration::from_millis(10);
+const ANCHOR_MAX_CHANGE: usize = 16;
 
 enum InputMsg {
     Text(String),
@@ -37,6 +39,7 @@ struct Target {
     label: String,
     dead: bool,
     mirror: Vec<Line<'static>>,
+    anchor: Option<(usize, u16)>,
 }
 
 pub fn run(
@@ -50,6 +53,7 @@ pub fn run(
             pane_id: p.pane_id,
             dead: false,
             mirror: Vec::new(),
+            anchor: None,
         })
         .collect();
     let mut sent: usize = 0;
@@ -124,6 +128,7 @@ pub fn run(
             match msg {
                 MirrorMsg::Mirror(idx, lines) => {
                     if let Some(t) = targets.get_mut(idx) {
+                        t.anchor = track_anchor(&t.mirror, &lines, t.anchor);
                         t.mirror = lines;
                     }
                 }
@@ -325,8 +330,10 @@ fn draw(
             Paragraph::new(Line::from(format!(" ✕ {} dead — pane closed or unreachable ", t.label)).red())
         } else {
             let rows = cell.height as usize;
-            let shown = &t.mirror[t.mirror.len().saturating_sub(rows)..];
-            Paragraph::new(with_cursor(shown, cursor_on, cell.width))
+            let cut = t.mirror.len().saturating_sub(rows);
+            let shown = &t.mirror[cut..];
+            let anchor = t.anchor.map(|(r, c)| (r.saturating_sub(cut), c));
+            Paragraph::new(with_cursor(shown, anchor, cursor_on, cell.width))
         };
         f.render_widget(body, cell);
         if let Some(sep) = cells.get(i * 2 + 1) {
@@ -336,7 +343,12 @@ fn draw(
     }
 }
 
-fn with_cursor(lines: &[Line<'static>], cursor_on: bool, width: u16) -> Vec<Line<'static>> {
+fn with_cursor(
+    lines: &[Line<'static>],
+    anchor: Option<(usize, u16)>,
+    cursor_on: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut out = lines.to_vec();
     if !cursor_on {
         if out.is_empty() {
@@ -344,40 +356,178 @@ fn with_cursor(lines: &[Line<'static>], cursor_on: bool, width: u16) -> Vec<Line
         }
         return out;
     }
-    let row = out
-        .iter()
-        .rposition(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.content.contains(|c: char| !c.is_whitespace()))
-        })
-        .unwrap_or(out.len().saturating_sub(1));
-    if let Some(l) = out.get_mut(row) {
-        let mut spans = std::mem::take(&mut l.spans);
-        while let Some(last) = spans.last() {
-            if last.content.trim_end_matches(' ').is_empty() {
-                spans.pop();
-            } else {
-                break;
-            }
-        }
-        if let Some(last) = spans.last_mut() {
-            let trimmed = last.content.trim_end().to_string();
-            last.content = Cow::Owned(trimmed);
-        }
-        let line_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
-        l.spans = spans;
-        let block =
-            || Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
-        if line_width < width {
-            l.spans.push(block());
-        } else if let Some(next) = out.get_mut(row + 1) {
-            next.spans.insert(0, block());
+    if out.is_empty() {
+        return out;
+    }
+    let (row, col) = match anchor.filter(|(r, _)| *r < out.len()) {
+        Some(a) => a,
+        None => match heuristic_anchor(&out) {
+            Some(a) => a,
+            None => return out,
+        },
+    };
+    place_block(&mut out, row, col, width);
+    out
+}
+
+fn heuristic_anchor(lines: &[Line<'static>]) -> Option<(usize, u16)> {
+    let row = lines.iter().rposition(|l| {
+        l.spans
+            .iter()
+            .any(|s| s.content.contains(|c: char| !c.is_whitespace()))
+    })?;
+    let plain: String = lines[row].spans.iter().map(|s| s.content.as_ref()).collect();
+    Some((row, plain.trim_end().width() as u16))
+}
+
+fn block_span() -> Span<'static> {
+    Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED))
+}
+
+fn place_block(out: &mut Vec<Line<'static>>, row: usize, col: u16, width: u16) {
+    if col >= width {
+        if let Some(next) = out.get_mut(row + 1) {
+            insert_block_span(next, 0);
         } else {
-            out.push(Line::from(vec![block()]));
+            out.push(Line::from(vec![block_span()]));
+        }
+        return;
+    }
+    let line = &mut out[row];
+    let full: u16 = line.spans.iter().map(|s| s.width() as u16).sum();
+    if col >= full {
+        trim_trailing_ws(line);
+        line.spans.push(block_span());
+        return;
+    }
+    insert_block_span(line, col);
+}
+
+fn trim_trailing_ws(line: &mut Line<'static>) {
+    while line
+        .spans
+        .last()
+        .is_some_and(|s| s.content.trim_end_matches(' ').is_empty())
+    {
+        line.spans.pop();
+    }
+    if let Some(last) = line.spans.last_mut() {
+        last.content = Cow::Owned(last.content.trim_end().to_string());
+    }
+    if line.spans.is_empty() {
+        line.spans.push(Span::from(""));
+    }
+}
+
+fn split_at_width(s: &str, off: u16) -> (String, String) {
+    let mut used: u16 = 0;
+    for (bi, ch) in s.char_indices() {
+        if used >= off {
+            return (s[..bi].to_string(), s[bi..].to_string());
+        }
+        used += ch.width().unwrap_or(0) as u16;
+    }
+    (s.to_string(), String::new())
+}
+
+fn insert_block_span(line: &mut Line<'static>, col: u16) {
+    let spans = std::mem::take(&mut line.spans);
+    let mut new: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
+    let mut acc: u16 = 0;
+    let mut placed = false;
+    for span in spans {
+        let w = span.width() as u16;
+        if !placed && col < acc + w.max(1) {
+            let (prefix, rest) = split_at_width(span.content.as_ref(), col.saturating_sub(acc));
+            if !prefix.is_empty() {
+                new.push(Span::styled(prefix, span.style));
+            }
+            let cover: String = rest
+                .chars()
+                .next()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            new.push(Span::styled(cover.clone(), span.style.add_modifier(Modifier::REVERSED)));
+            let after = &rest[cover.len()..];
+            if !after.is_empty() {
+                new.push(Span::styled(after.to_string(), span.style));
+            }
+            placed = true;
+        } else {
+            new.push(span);
+        }
+        acc = acc.saturating_add(w);
+    }
+    if !placed {
+        new.push(block_span());
+    }
+    line.spans = new;
+}
+
+fn plain_of(l: &Line<'static>) -> String {
+    l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+fn common_suffix_chars(a: &str, b: &str, prefix: usize) -> usize {
+    let ac = a.chars().count();
+    let bc = b.chars().count();
+    let max_s = ac.min(bc).saturating_sub(prefix);
+    let av: Vec<char> = a.chars().collect();
+    let bv: Vec<char> = b.chars().collect();
+    let mut s = 0;
+    while s < max_s && av[ac - 1 - s] == bv[bc - 1 - s] {
+        s += 1;
+    }
+    s
+}
+
+fn track_anchor(
+    old: &[Line<'static>],
+    new: &[Line<'static>],
+    prev: Option<(usize, u16)>,
+) -> Option<(usize, u16)> {
+    if old.is_empty() || new.is_empty() {
+        return heuristic_anchor(new).or(prev);
+    }
+    let n = old.len().max(new.len());
+    let mut diffs: Vec<(usize, usize, usize, usize, String)> = Vec::new();
+    for i in 0..n {
+        let a = old.get(i).map(plain_of).unwrap_or_default();
+        let b = new.get(i).map(plain_of).unwrap_or_default();
+        if a == b {
+            continue;
+        }
+        let p = common_prefix_chars(&a, &b);
+        let s = common_suffix_chars(&a, &b, p);
+        let alen = a.chars().count();
+        let blen = b.chars().count();
+        let changed = alen.max(blen).saturating_sub(p + s);
+        if changed == 0 || changed > ANCHOR_MAX_CHANGE {
+            continue;
+        }
+        let grew_rank = if alen != blen { 0 } else { 1 };
+        let kept: String = b.chars().take(blen.saturating_sub(s)).collect();
+        diffs.push((i, grew_rank, 0usize, changed, kept));
+    }
+    if n >= 4 && diffs.len() > n / 2 {
+        return prev;
+    }
+    let mut best: Option<(usize, u16)> = None;
+    let mut best_score: (usize, usize, usize) = (usize::MAX, usize::MAX, usize::MAX);
+    for (i, grew_rank, _pad, changed, kept) in diffs {
+        let col = kept.width() as u16;
+        let dist = prev.map(|(r, _)| i.abs_diff(r)).unwrap_or(usize::MAX);
+        let score = (grew_rank, dist, changed);
+        if score < best_score {
+            best_score = score;
+            best = Some((i, col));
         }
     }
-    out
+    best.or(prev)
 }
 
 #[cfg(test)]
@@ -417,6 +567,7 @@ mod tests {
             label: "t".into(),
             dead: false,
             mirror: full,
+            anchor: None,
         }];
         terminal
             .draw(|f| draw(f, &targets, 3, &None, true))
@@ -439,7 +590,9 @@ mod tests {
     fn cursor_wraps_when_anchor_line_fills_cell() {
         let width = 40u16;
         let mirror = parse_ansi(&format!("{}\r\n{}\r\n", "x".repeat(width as usize), " ".repeat(20)));
-        let mirror = with_cursor(&mirror, true, width);
+        let anchor = heuristic_anchor(&mirror).unwrap();
+        assert_eq!(anchor, (0, width));
+        let mirror = with_cursor(&mirror, Some(anchor), true, width);
         let first: String = mirror[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(first.chars().count(), width as usize);
         assert_eq!(mirror[1].spans[0].content, " ");
@@ -459,6 +612,7 @@ mod tests {
             label: "t".into(),
             dead: false,
             mirror: parse_ansi(&raw),
+            anchor: None,
         }];
         terminal
             .draw(|f| draw(f, &targets, 0, &None, true))
@@ -470,5 +624,153 @@ mod tests {
             }
         }
         assert!(reversed >= 1, "shadow cursor must be visible, got {reversed} reversed cells");
+    }
+
+    #[test]
+    fn track_anchor_follows_typed_char_mid_line() {
+        let mut old = vec![
+            Line::from("use anyhow::Result;"),
+            Line::from("const READ_LINES: usize = 999;"),
+            Line::from(" NOR   [scratch] [+]                        1 sel  2:5 "),
+        ];
+        let new = vec![
+            old[0].clone(),
+            Line::from("const READ_LINESX: usize = 999;"),
+            Line::from(" NOR   [scratch] [+]                        1 sel  2:6 "),
+        ];
+        let anchor = track_anchor(&old, &new, Some((1, 16)));
+        assert_eq!(anchor, Some((1, 17)), "cursor should sit right after the inserted X");
+        old = new;
+        let _ = old;
+    }
+
+    #[test]
+    fn track_anchor_prefers_row_near_previous() {
+        let old = vec![
+            Line::from("let x = 1;"),
+            Line::from("~"),
+            Line::from(" NOR   file.rs                    1 sel  12:8 "),
+        ];
+        let new = vec![
+            Line::from("let x = 2;"),
+            Line::from("~"),
+            Line::from(" NOR   file.rs                    1 sel  12:9 "),
+        ];
+        let anchor = track_anchor(&old, &new, Some((0, 9)));
+        assert_eq!(anchor, Some((0, 9)), "text row wins over the far status row");
+    }
+
+    #[test]
+    fn track_anchor_prefers_inserted_row_over_replaced_status() {
+        let old = vec![
+            Line::from("    5  use anyhow::Result;"),
+            Line::from("    6  use serde::Deserialize;"),
+            Line::from(" NOR   src/main.rs                1 sel  5:21 "),
+        ];
+        let new = vec![
+            Line::from("    5  use anyhow::ResultX;"),
+            Line::from("    6  use serde::Deserialize;"),
+            Line::from(" NOR   src/main.rs                1 sel  5:22 "),
+        ];
+        let anchor = track_anchor(&old, &new, Some((2, 40))).unwrap();
+        assert_eq!(
+            anchor.0, 0,
+            "text row grew by one char and must win over the status row's same-length counter update"
+        );
+        assert_eq!(anchor.1, 26, "anchor lands at the width of the kept prefix of the new line");
+    }
+
+    #[test]
+    fn track_anchor_prefers_shrunk_row_for_backspace() {
+        let old = vec![
+            Line::from("hello world"),
+            Line::from(" NOR   file.rs                1 sel  1:6 "),
+        ];
+        let new = vec![
+            Line::from("hello"),
+            Line::from(" NOR   file.rs                1 sel  1:1 "),
+        ];
+        let anchor = track_anchor(&old, &new, Some((0, 11))).unwrap();
+        assert_eq!(anchor, (0, 5), "backspace shrinks text, anchor moves to the kept text width");
+    }
+
+    #[test]
+    fn track_anchor_ignores_replaced_only_status_when_text_also_changed() {
+        let old = vec![
+            Line::from("    5  use anyhow::Result;"),
+            Line::from(" NOR   src/main.rs                1 sel  5:21 "),
+        ];
+        let new = vec![
+            Line::from("    5  use anyhow::Result;"),
+            Line::from(" NOR   src/main.rs                1 sel  5:21 "),
+        ];
+        let anchor = track_anchor(&old, &new, Some((1, 40)));
+        assert_eq!(anchor, Some((1, 40)), "static screen: no diff, keep prev anchor");
+    }
+
+    #[test]
+    fn track_anchor_ignores_full_screen_scroll() {
+        let old: Vec<Line<'static>> = (0..20).map(|i| Line::from(format!("line-{i}"))).collect();
+        let new: Vec<Line<'static>> = (1..21).map(|i| Line::from(format!("line-{i}"))).collect();
+        let anchor = track_anchor(&old, &new, Some((3, 6)));
+        assert_eq!(anchor, Some((3, 6)), "a scrolled screen must not move the anchor");
+    }
+
+    #[test]
+    fn track_anchor_picks_smallest_change_without_prev() {
+        let old = vec![
+            Line::from("fn main() {"),
+            Line::from(" NOR   file.rs                    1 sel  1:1 "),
+        ];
+        let new = vec![
+            Line::from("fn mainX() {"),
+            Line::from(" NOR   file.rs                    1 sel  1:2 "),
+        ];
+        let anchor = track_anchor(&old, &new, None).unwrap();
+        assert_eq!(anchor.0, 0, "first-ever diff should land on the text row");
+    }
+
+    #[test]
+    fn place_block_reverses_char_under_cursor() {
+        let mirror = vec![Line::from("abcdef")];
+        let out = with_cursor(&mirror, Some((0, 3)), true, 40);
+        let spans = &out[0].spans;
+        assert_eq!(spans.iter().map(|s| s.content.to_string()).collect::<String>(), "abcdef");
+        assert!(spans
+            .iter()
+            .any(|s| s.content == "d" && s.style.add_modifier.contains(Modifier::REVERSED)));
+    }
+
+    #[test]
+    fn place_block_appends_space_at_end_of_line() {
+        let mirror = vec![Line::from("tmp# ")];
+        let out = with_cursor(&mirror, Some((0, 4)), true, 40);
+        let flat: String = out[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(flat, "tmp# ");
+        assert!(out[0].spans.last().unwrap().style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn place_block_wraps_col_at_cell_width() {
+        let mirror = vec![Line::from("aaaa"), Line::from("bbbb")];
+        let out = with_cursor(&mirror, Some((0, 4)), true, 4);
+        assert!(out[1].spans[0].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn place_block_handles_double_width_chars() {
+        let mirror = vec![Line::from("中文abc")];
+        let out = with_cursor(&mirror, Some((0, 2)), true, 40);
+        let flat: String = out[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(flat, "中文abc");
+        assert!(out[0].spans.iter().any(|s| s.content == "文"));
+    }
+
+    #[test]
+    fn track_anchor_follows_cjk_typing_width() {
+        let old = vec![Line::from("你说"), Line::from(" NOR  file.rs   1:2 ")];
+        let new = vec![Line::from("你说好"), Line::from(" NOR  file.rs   1:3 ")];
+        let anchor = track_anchor(&old, &new, Some((0, 4)));
+        assert_eq!(anchor, Some((0, 6)), "one CJK char advances the anchor by 2 columns");
     }
 }

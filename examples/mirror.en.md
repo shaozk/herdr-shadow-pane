@@ -3,7 +3,7 @@
 When the broadcast page opens, it lays out every other pane of the current tab as side-by-side mirrors. Each mirror shows:
 
 - The target pane's visible output (with original terminal styling — fg/bg, bold, reverse, etc.)
-- A shadow cursor — one reversed-space cell, shown as `█` here — right after the last non-empty cell of the last line. That's where the next broadcast character will land.
+- A shadow cursor (rendered as the cell's existing character with REVERSED applied — same look as a real terminal cursor; shown as `█` here) anchored at the next landing point of your broadcast input. The console tracks the row that just changed via screen diff, so the cursor follows your typing instead of being pinned to the status line.
 - A 1-column dim separator between mirrors; no borders.
 
 Example with two targets (helix + opencode):
