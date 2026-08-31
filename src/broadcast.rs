@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ansi_to_tui::IntoText;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Modifier, Style, Stylize},
@@ -142,37 +142,47 @@ pub fn run(
         terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
 
         if event::poll(RENDER_TICK)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    notice = None;
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Char('q'), KeyModifiers::CONTROL) => break,
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            let _ = input_tx.send(InputMsg::Key("ctrl+c"));
+                        }
+                        (KeyCode::Esc, _) => {
+                            let _ = input_tx.send(InputMsg::Key("esc"));
+                        }
+                        (KeyCode::Enter, _) => {
+                            let _ = input_tx.send(InputMsg::Key("enter"));
+                        }
+                        (KeyCode::Backspace, _) => {
+                            let _ = input_tx.send(InputMsg::Key("backspace"));
+                        }
+                        (KeyCode::Char(ch), KeyModifiers::NONE) | (KeyCode::Char(ch), KeyModifiers::SHIFT) => {
+                            let mut buf = [0u8; 4];
+                            let _ = input_tx.send(InputMsg::Text(ch.encode_utf8(&mut buf).to_string()));
+                        }
+                        (KeyCode::Char(ch), KeyModifiers::CONTROL) => {
+                            notice = Some(format!("ctrl+{} is outside the v1 key set — not sent", ch));
+                        }
+                        _ => {
+                            notice = Some("key not in the v1 key set — not sent".to_string());
+                        }
+                    }
+                    sent = sent.saturating_add(1);
                 }
-                notice = None;
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), KeyModifiers::CONTROL) => break,
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        let _ = input_tx.send(InputMsg::Key("ctrl+c"));
-                    }
-                    (KeyCode::Esc, _) => {
-                        let _ = input_tx.send(InputMsg::Key("esc"));
-                    }
-                    (KeyCode::Enter, _) => {
-                        let _ = input_tx.send(InputMsg::Key("enter"));
-                    }
-                    (KeyCode::Backspace, _) => {
-                        let _ = input_tx.send(InputMsg::Key("backspace"));
-                    }
-                    (KeyCode::Char(ch), KeyModifiers::NONE) | (KeyCode::Char(ch), KeyModifiers::SHIFT) => {
-                        let mut buf = [0u8; 4];
-                        let _ = input_tx.send(InputMsg::Text(ch.encode_utf8(&mut buf).to_string()));
-                    }
-                    (KeyCode::Char(ch), KeyModifiers::CONTROL) => {
-                        notice = Some(format!("ctrl+{} is outside the v1 key set — not sent", ch));
-                    }
-                    _ => {
-                        notice = Some("key not in the v1 key set — not sent".to_string());
+                Event::Mouse(mouse) => {
+                    if let Some(key) = wheel_key(mouse.kind) {
+                        notice = None;
+                        let _ = input_tx.send(InputMsg::Key(key));
+                        sent = sent.saturating_add(1);
                     }
                 }
-                sent = sent.saturating_add(1);
+                _ => {}
             }
         } else {
             blink = blink.saturating_add(1);
@@ -205,6 +215,16 @@ pub fn run(
     }
     layout::exit_restore(&snapshot, &probes);
     Ok(())
+}
+
+fn wheel_key(kind: MouseEventKind) -> Option<&'static str> {
+    match kind {
+        MouseEventKind::ScrollUp => Some("up"),
+        MouseEventKind::ScrollDown => Some("down"),
+        MouseEventKind::ScrollLeft => Some("left"),
+        MouseEventKind::ScrollRight => Some("right"),
+        _ => None,
+    }
 }
 
 fn dispatch<F>(panes: &[String], dead: &mut [bool], send: F)
@@ -764,6 +784,18 @@ mod tests {
         let flat: String = out[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(flat, "中文abc");
         assert!(out[0].spans.iter().any(|s| s.content == "文"));
+    }
+
+    #[test]
+    fn wheel_maps_scroll_to_arrow_keys_only() {
+        use crossterm::event::MouseButton;
+        assert_eq!(wheel_key(MouseEventKind::ScrollUp), Some("up"));
+        assert_eq!(wheel_key(MouseEventKind::ScrollDown), Some("down"));
+        assert_eq!(wheel_key(MouseEventKind::ScrollLeft), Some("left"));
+        assert_eq!(wheel_key(MouseEventKind::ScrollRight), Some("right"));
+        assert_eq!(wheel_key(MouseEventKind::Down(MouseButton::Left)), None);
+        assert_eq!(wheel_key(MouseEventKind::Up(MouseButton::Left)), None);
+        assert_eq!(wheel_key(MouseEventKind::Moved), None);
     }
 
     #[test]
