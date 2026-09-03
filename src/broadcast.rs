@@ -21,8 +21,11 @@ const READ_LINES: usize = 999;
 const READ_TICK: Duration = Duration::from_millis(50);
 const RENDER_TICK: Duration = Duration::from_millis(30);
 const BLINK_TICKS: u32 = 16;
+const WIDTH_REFRESH_TICK: Duration = Duration::from_millis(2000);
 const INPUT_BATCH_WINDOW: Duration = Duration::from_millis(10);
 const ANCHOR_MAX_CHANGE: usize = 16;
+const ANCHOR_CHANGE_RATIO: usize = 3; // 1/3 of the wider line
+const ANCHOR_SHIFT_MAX: i64 = 8;
 
 enum InputMsg {
     Text(String),
@@ -40,6 +43,15 @@ struct Target {
     dead: bool,
     mirror: Vec<Line<'static>>,
     anchor: Option<(usize, u16)>,
+    plain: Vec<String>,
+    ver: u64,
+    render: RenderCache,
+}
+
+#[derive(Default)]
+struct RenderCache {
+    lines: Vec<Line<'static>>,
+    key: (u64, usize, Option<(usize, u16)>, bool, u16, usize),
 }
 
 pub fn run(
@@ -54,6 +66,9 @@ pub fn run(
             dead: false,
             mirror: Vec::new(),
             anchor: None,
+            plain: Vec::new(),
+            ver: 1,
+            render: RenderCache::default(),
         })
         .collect();
     let mut sent: usize = 0;
@@ -68,20 +83,69 @@ pub fn run(
         .unwrap_or_default();
     let snapshot = layout::capture(&probe);
 
+    let widths = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        u16,
+    >::new()));
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let widths = widths.clone();
+        let running = running.clone();
+        let probe = probe.clone();
+        thread::spawn(move || {
+            while running.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(l) = herdr::tab_layout(&probe) {
+                    let mut m = widths.lock().unwrap();
+                    for (id, rect) in &l.panes {
+                        m.insert(id.clone(), rect.width.max(1) as u16);
+                    }
+                }
+                thread::sleep(WIDTH_REFRESH_TICK);
+            }
+        });
+    }
+
     let (mirror_tx, mirror_rx) = mpsc::channel::<MirrorMsg>();
     let mut workers = Vec::new();
     for (idx, t) in targets.iter().enumerate() {
         let tx = mirror_tx.clone();
         let pane = t.pane_id.clone();
-        workers.push(thread::spawn(move || loop {
-            let msg = match herdr::read_visible(&pane, READ_LINES) {
-                Ok(out) => MirrorMsg::Mirror(idx, parse_ansi(&out)),
-                Err(_) => MirrorMsg::Dead(idx),
-            };
-            if tx.send(msg).is_err() {
-                return;
+        let widths = widths.clone();
+        workers.push(thread::spawn(move || {
+            let mut socket = crate::herdr_socket::SocketClient::connect().ok();
+            loop {
+                let read = |socket: &mut Option<crate::herdr_socket::SocketClient>| {
+                    match socket
+                        .as_mut()
+                        .map(|c| c.read_visible(&pane, READ_LINES))
+                    {
+                        Some(Ok(out)) => Ok(out),
+                        Some(Err(_)) => {
+                            // Socket degraded (server restart, protocol gap):
+                            // fall back to the CLI path for the rest of the run.
+                            *socket = None;
+                            herdr::read_visible(&pane, READ_LINES)
+                        }
+                        None => herdr::read_visible(&pane, READ_LINES),
+                    }
+                };
+                let msg = match read(&mut socket) {
+                    Ok(out) => {
+                        let width = widths
+                            .lock()
+                            .unwrap()
+                            .get(&pane)
+                            .copied()
+                            .unwrap_or_default();
+                        MirrorMsg::Mirror(idx, wrap_lines(parse_ansi(&out), width))
+                    }
+                    Err(_) => MirrorMsg::Dead(idx),
+                };
+                if tx.send(msg).is_err() {
+                    return;
+                }
+                thread::sleep(READ_TICK);
             }
-            thread::sleep(READ_TICK);
         }));
     }
     drop(mirror_tx);
@@ -128,8 +192,11 @@ pub fn run(
             match msg {
                 MirrorMsg::Mirror(idx, lines) => {
                     if let Some(t) = targets.get_mut(idx) {
-                        t.anchor = track_anchor(&t.mirror, &lines, t.anchor);
+                        let new_plain: Vec<String> = lines.iter().map(plain_of).collect();
+                        t.anchor = track_anchor_plain(&t.plain, &new_plain, t.anchor);
                         t.mirror = lines;
+                        t.plain = new_plain;
+                        t.ver = t.ver.wrapping_add(1);
                     }
                 }
                 MirrorMsg::Dead(idx) => {
@@ -139,7 +206,7 @@ pub fn run(
                 }
             }
         }
-        terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
+        terminal.draw(|f| draw(f, &mut targets, sent, &notice, cursor_on))?;
 
         if event::poll(RENDER_TICK)? {
             match event::read()? {
@@ -186,14 +253,14 @@ pub fn run(
             }
         } else {
             blink = blink.saturating_add(1);
-            if blink % BLINK_TICKS == 0 {
+            if blink.is_multiple_of(BLINK_TICKS) {
                 cursor_on = !cursor_on;
             }
         }
 
         if !targets.is_empty() && targets.iter().all(|t| t.dead) {
             notice = Some("all targets are gone — exiting".to_string());
-            terminal.draw(|f| draw(f, &targets, sent, &notice, cursor_on))?;
+            terminal.draw(|f| draw(f, &mut targets, sent, &notice, cursor_on))?;
             thread::sleep(Duration::from_millis(1200));
             break;
         }
@@ -201,6 +268,7 @@ pub fn run(
 
     drop(input_tx);
     drop(mirror_rx);
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
     for w in workers {
         let _ = w.join();
     }
@@ -314,7 +382,7 @@ fn label_of(info: &PaneInfo) -> String {
 
 fn draw(
     f: &mut Frame,
-    targets: &[Target],
+    targets: &mut [Target],
     sent: usize,
     notice: &Option<String>,
     cursor_on: bool,
@@ -344,16 +412,28 @@ fn draw(
         horizontal.push(Constraint::Fill(1));
     }
     let cells = Layout::horizontal(horizontal).split(body);
-    for (i, t) in targets.iter().enumerate() {
+    for (i, t) in targets.iter_mut().enumerate() {
         let cell = cells[i * 2];
         let body = if t.dead {
             Paragraph::new(Line::from(format!(" ✕ {} dead — pane closed or unreachable ", t.label)).red())
         } else {
-            let rows = cell.height as usize;
-            let cut = t.mirror.len().saturating_sub(rows);
-            let shown = &t.mirror[cut..];
-            let anchor = t.anchor.map(|(r, c)| (r.saturating_sub(cut), c));
-            Paragraph::new(with_cursor(shown, anchor, cursor_on, cell.width))
+            let shown_rows = cell.height as usize;
+            let cut = t.mirror.len().saturating_sub(shown_rows);
+            let key = (t.ver, t.mirror.len(), t.anchor, cursor_on, cell.width, shown_rows);
+            if t.render.key != key {
+                let shown = &t.mirror[cut..];
+                let anchor = t
+                    .anchor
+                    .map(|(r, c)| (r.saturating_sub(cut), c))
+                    .filter(|(r, _)| *r < shown.len())
+                    .or_else(|| {
+                        let plain_cut = cut.min(t.plain.len());
+                        heuristic_anchor(&t.plain[plain_cut..])
+                    });
+                t.render.lines = with_cursor(shown, anchor, cursor_on, cell.width);
+                t.render.key = key;
+            }
+            Paragraph::new(t.render.lines.clone())
         };
         f.render_widget(body, cell);
         if let Some(sep) = cells.get(i * 2 + 1) {
@@ -379,25 +459,40 @@ fn with_cursor(
     if out.is_empty() {
         return out;
     }
-    let (row, col) = match anchor.filter(|(r, _)| *r < out.len()) {
-        Some(a) => a,
-        None => match heuristic_anchor(&out) {
-            Some(a) => a,
-            None => return out,
-        },
+    let Some((row, col)) = anchor.filter(|(r, _)| *r < out.len()) else {
+        return out;
     };
     place_block(&mut out, row, col, width);
     out
 }
 
-fn heuristic_anchor(lines: &[Line<'static>]) -> Option<(usize, u16)> {
-    let row = lines.iter().rposition(|l| {
-        l.spans
-            .iter()
-            .any(|s| s.content.contains(|c: char| !c.is_whitespace()))
-    })?;
-    let plain: String = lines[row].spans.iter().map(|s| s.content.as_ref()).collect();
-    Some((row, plain.trim_end().width() as u16))
+const STATUS_MODE_TOKENS: &[&str] = &[
+    "nor", "ins", "sel", "nop", "op", "normal", "insert", "visual", "select", "replace",
+    "v-block", "v-line", "vblock", "vline",
+];
+
+fn looks_like_status_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("--") && trimmed.ends_with("--") {
+        return true;
+    }
+    trimmed
+        .split(|c: char| c.is_whitespace() || c == '│' || c == '|')
+        .any(|tok| STATUS_MODE_TOKENS.contains(&tok.to_lowercase().as_str()))
+}
+
+fn heuristic_anchor(plain: &[String]) -> Option<(usize, u16)> {
+    let last = plain
+        .iter()
+        .rposition(|l| l.chars().any(|c| !c.is_whitespace()))?;
+    if looks_like_status_line(&plain[last])
+        && let Some(row) = plain[..last].iter().rposition(|l| {
+            !l.chars().all(|c| c.is_whitespace()) && !looks_like_status_line(l)
+        })
+    {
+        return Some((row, plain[row].trim_end().width() as u16));
+    }
+    Some((last, plain[last].trim_end().width() as u16))
 }
 
 fn block_span() -> Span<'static> {
@@ -484,6 +579,63 @@ fn insert_block_span(line: &mut Line<'static>, col: u16) {
     line.spans = new;
 }
 
+fn split_at_width_exact(s: &str, off: u16) -> (String, String) {
+    let mut used: u16 = 0;
+    for (bi, ch) in s.char_indices() {
+        let w = ch.width().unwrap_or(0) as u16;
+        if used + w > off {
+            return (s[..bi].to_string(), s[bi..].to_string());
+        }
+        used += w;
+        if used == off {
+            let next = bi + ch.len_utf8();
+            return (s[..next].to_string(), s[next..].to_string());
+        }
+    }
+    (s.to_string(), String::new())
+}
+
+fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return lines;
+    }
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut cur: Vec<Span<'static>> = Vec::new();
+        let mut cur_w: u16 = 0;
+        for span in line.spans {
+            let style = span.style;
+            let mut rest: String = span.content.into_owned();
+            while !rest.is_empty() {
+                let w = rest.width() as u16;
+                if cur_w + w <= width {
+                    cur_w += w;
+                    cur.push(Span::styled(rest, style));
+                    break;
+                }
+                let (head, tail) = split_at_width_exact(&rest, width - cur_w);
+                if head.is_empty() {
+                    // A single cell narrower than one wide char: emit it alone.
+                    let bi = rest.char_indices().next().map(|(i, _)| i).unwrap_or(0)
+                        + rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    let (ch, tail) = rest.split_at(bi);
+                    cur.push(Span::styled(ch.to_string(), style));
+                    out.push(Line::from(std::mem::take(&mut cur)));
+                    rest = tail.to_string();
+                    cur_w = 0;
+                    continue;
+                }
+                cur.push(Span::styled(head, style));
+                out.push(Line::from(std::mem::take(&mut cur)));
+                rest = tail;
+                cur_w = 0;
+            }
+        }
+        out.push(Line::from(cur));
+    }
+    out
+}
+
 fn plain_of(l: &Line<'static>) -> String {
     l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
@@ -505,28 +657,76 @@ fn common_suffix_chars(a: &str, b: &str, prefix: usize) -> usize {
     s
 }
 
-fn track_anchor(
-    old: &[Line<'static>],
-    new: &[Line<'static>],
+fn detect_shift(old: &[String], new: &[String]) -> i64 {
+    let min_len = old.len().min(new.len());
+    let score = |d: i64| -> usize {
+        (0..new.len())
+            .filter(|&i| {
+                let j = i as i64 - d;
+                j >= 0 && (j as usize) < old.len() && old[j as usize] == new[i]
+            })
+            .count()
+    };
+    let mut best_d = 0i64;
+    let mut best = score(0);
+    let floor = (min_len * 3 / 5).max(2);
+    for d in 1..=ANCHOR_SHIFT_MAX {
+        for cand in [d, -d] {
+            let s = score(cand);
+            if s > best && s >= floor {
+                best = s;
+                best_d = cand;
+            }
+        }
+    }
+    best_d
+}
+
+fn track_anchor_plain(
+    old: &[String],
+    new: &[String],
     prev: Option<(usize, u16)>,
 ) -> Option<(usize, u16)> {
     if old.is_empty() || new.is_empty() {
         return heuristic_anchor(new).or(prev);
     }
+    if old == new {
+        return prev;
+    }
+    let d = detect_shift(old, new);
+    let prev_shifted = prev.map(|(r, c)| {
+        let row = (r as i64 + d).clamp(0, (new.len() - 1) as i64) as usize;
+        (row, c)
+    });
     let n = old.len().max(new.len());
     let mut diffs: Vec<(usize, usize, usize, usize, String)> = Vec::new();
-    for i in 0..n {
-        let a = old.get(i).map(plain_of).unwrap_or_default();
-        let b = new.get(i).map(plain_of).unwrap_or_default();
-        if a == b {
+    for (i, b) in new.iter().enumerate() {
+        let j = i as i64 - d;
+        let paired = j >= 0 && (j as usize) < old.len();
+        if d != 0 && !paired {
+            // A confident shift means scroll/insert edges: the unpaired row
+            // is scrolled-in content, not an in-place edit at the cursor.
             continue;
         }
-        let p = common_prefix_chars(&a, &b);
-        let s = common_suffix_chars(&a, &b, p);
+        let a = if paired {
+            old[j as usize].as_str()
+        } else {
+            ""
+        };
+        if a == b.as_str() {
+            continue;
+        }
+        let b = b.as_str();
+        let p = common_prefix_chars(a, b);
+        let s = common_suffix_chars(a, b, p);
         let alen = a.chars().count();
         let blen = b.chars().count();
         let changed = alen.max(blen).saturating_sub(p + s);
-        if changed == 0 || changed > ANCHOR_MAX_CHANGE {
+        if changed == 0 {
+            continue;
+        }
+        let limit = ANCHOR_MAX_CHANGE.max(alen.max(blen) / ANCHOR_CHANGE_RATIO);
+        if changed > limit {
             continue;
         }
         let grew_rank = if alen != blen { 0 } else { 1 };
@@ -534,20 +734,33 @@ fn track_anchor(
         diffs.push((i, grew_rank, 0usize, changed, kept));
     }
     if n >= 4 && diffs.len() > n / 2 {
-        return prev;
+        return prev_shifted;
     }
     let mut best: Option<(usize, u16)> = None;
     let mut best_score: (usize, usize, usize) = (usize::MAX, usize::MAX, usize::MAX);
     for (i, grew_rank, _pad, changed, kept) in diffs {
         let col = kept.width() as u16;
-        let dist = prev.map(|(r, _)| i.abs_diff(r)).unwrap_or(usize::MAX);
+        let dist = prev_shifted
+            .map(|(r, _)| i.abs_diff(r))
+            .unwrap_or(usize::MAX);
         let score = (grew_rank, dist, changed);
         if score < best_score {
             best_score = score;
             best = Some((i, col));
         }
     }
-    best.or(prev)
+    best.or(prev_shifted)
+}
+
+#[cfg(test)]
+fn track_anchor(
+    old: &[Line<'static>],
+    new: &[Line<'static>],
+    prev: Option<(usize, u16)>,
+) -> Option<(usize, u16)> {
+    let old_plain: Vec<String> = old.iter().map(plain_of).collect();
+    let new_plain: Vec<String> = new.iter().map(plain_of).collect();
+    track_anchor_plain(&old_plain, &new_plain, prev)
 }
 
 #[cfg(test)]
@@ -588,13 +801,17 @@ mod tests {
             dead: false,
             mirror: full,
             anchor: None,
+            plain: Vec::new(),
+            ver: 1,
+            render: RenderCache::default(),
         }];
         terminal
-            .draw(|f| draw(f, &targets, 3, &None, true))
+            .draw(|f| draw(f, &mut targets, 3, &None, true))
             .unwrap();
         targets[0].mirror = parse_ansi("host# ");
+        targets[0].ver += 1;
         terminal
-            .draw(|f| draw(f, &targets, 4, &None, true))
+            .draw(|f| draw(f, &mut targets, 4, &None, true))
             .unwrap();
         let screen: String = terminal
             .backend()
@@ -610,7 +827,8 @@ mod tests {
     fn cursor_wraps_when_anchor_line_fills_cell() {
         let width = 40u16;
         let mirror = parse_ansi(&format!("{}\r\n{}\r\n", "x".repeat(width as usize), " ".repeat(20)));
-        let anchor = heuristic_anchor(&mirror).unwrap();
+        let plain: Vec<String> = mirror.iter().map(plain_of).collect();
+        let anchor = heuristic_anchor(&plain).unwrap();
         assert_eq!(anchor, (0, width));
         let mirror = with_cursor(&mirror, Some(anchor), true, width);
         let first: String = mirror[0].spans.iter().map(|s| s.content.to_string()).collect();
@@ -623,19 +841,23 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal as TestTerminal};
         let backend = TestBackend::new(40, 6);
         let mut terminal = TestTerminal::new(backend).unwrap();
-        let raw = format!("~\r\n~\r\n{}\r\n{}\r\n",
-            format!("~   {}  1 sel  1:1 ", "~".repeat(3)),
+        let raw = format!(
+            "~\r\n~\r\n~   {}  1 sel  1:1 \r\n{}\r\n",
+            "~".repeat(3),
             " ".repeat(40),
         );
-        let targets = vec![Target {
+        let mut targets = vec![Target {
             pane_id: "t".into(),
             label: "t".into(),
             dead: false,
             mirror: parse_ansi(&raw),
             anchor: None,
+            plain: parse_ansi(&raw).iter().map(plain_of).collect(),
+            ver: 1,
+            render: RenderCache::default(),
         }];
         terminal
-            .draw(|f| draw(f, &targets, 0, &None, true))
+            .draw(|f| draw(f, &mut targets, 0, &None, true))
             .unwrap();
         let mut reversed = 0usize;
         for cell in terminal.backend().buffer().content() {
@@ -644,6 +866,98 @@ mod tests {
             }
         }
         assert!(reversed >= 1, "shadow cursor must be visible, got {reversed} reversed cells");
+    }
+
+    #[test]
+    fn track_anchor_accepts_wide_redraw() {
+        let old = vec![
+            Line::from(format!("fn main() {{ {} }}", "let x = 1;".repeat(4))),
+            Line::from("~"),
+        ];
+        let mut redrawn = format!("fn main() {{ {} }}", "let x = 2;".repeat(4));
+        redrawn.push_str(" /* fmt */");
+        let new = vec![Line::from(redrawn), Line::from("~")];
+        let anchor = track_anchor(&old, &new, Some((0, 58)));
+        assert!(anchor.is_some(), "a proportional redraw within the ratio must still be tracked");
+    }
+
+    #[test]
+    fn track_anchor_still_rejects_full_line_replacement() {
+        let old = vec![
+            Line::from("a".repeat(60)),
+            Line::from("~"),
+        ];
+        let new = vec![
+            Line::from("b".repeat(60)),
+            Line::from("~"),
+        ];
+        let anchor = track_anchor(&old, &new, Some((1, 1)));
+        assert_eq!(anchor, Some((1, 1)), "replacing a whole line must be ignored");
+    }
+
+    #[test]
+    fn heuristic_anchor_skips_helix_status_line() {
+        let plain = vec![
+            "fn main() {}".to_string(),
+            "~".to_string(),
+            "~   xxx  1 sel  1:1 ".to_string(),
+            "   ".to_string(),
+        ];
+        assert_eq!(heuristic_anchor(&plain), Some((1, 1)));
+    }
+
+    #[test]
+    fn heuristic_anchor_skips_vim_mode_line() {
+        let plain = vec!["let x = 1;".to_string(), "-- INSERT --".to_string()];
+        assert_eq!(heuristic_anchor(&plain), Some((0, 10)));
+    }
+
+    #[test]
+    fn heuristic_anchor_keeps_plain_prompt() {
+        let plain = vec!["output".to_string(), "host# ".to_string()];
+        assert_eq!(heuristic_anchor(&plain), Some((1, 5)));
+    }
+
+    #[test]
+    fn mirror_wraps_at_source_pane_width() {
+        let wrapped = wrap_lines(vec![Line::from("x".repeat(90))], 40);
+        assert_eq!(texts(&wrapped), vec!["x".repeat(40), "x".repeat(40), "x".repeat(10)]);
+    }
+
+    #[test]
+    fn wrap_preserves_span_styles() {
+        let line = Line::from(vec![
+            Span::styled("aaa", Style::default().bold()),
+            Span::styled("bbb", Style::default().italic()),
+        ]);
+        let wrapped = wrap_lines(vec![line], 5);
+        assert_eq!(texts(&wrapped), vec!["aaabb", "b"]);
+        assert!(wrapped[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(wrapped[0].spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        assert!(wrapped[1].spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn wrap_never_splits_wide_char() {
+        let wrapped = wrap_lines(vec![Line::from("中文中文中文")], 5);
+        assert_eq!(texts(&wrapped), vec!["中文", "中文", "中文"]);
+    }
+
+    #[test]
+    fn cursor_col_maps_to_visual_position() {
+        let mirror = wrap_lines(parse_ansi("0123456789X\r\n"), 10);
+        assert_eq!(texts(&mirror), vec!["0123456789", "X"]);
+        let plain: Vec<String> = mirror.iter().map(plain_of).collect();
+        let anchor = heuristic_anchor(&plain).unwrap();
+        assert_eq!(anchor, (1, 1));
+        let out = with_cursor(&mirror, Some(anchor), true, 10);
+        assert!(
+            out[1]
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "the shadow cursor must land on the wrapped continuation row"
+        );
     }
 
     #[test]
@@ -729,11 +1043,59 @@ mod tests {
     }
 
     #[test]
-    fn track_anchor_ignores_full_screen_scroll() {
+    fn track_anchor_follows_full_screen_scroll() {
         let old: Vec<Line<'static>> = (0..20).map(|i| Line::from(format!("line-{i}"))).collect();
         let new: Vec<Line<'static>> = (1..21).map(|i| Line::from(format!("line-{i}"))).collect();
         let anchor = track_anchor(&old, &new, Some((3, 6)));
-        assert_eq!(anchor, Some((3, 6)), "a scrolled screen must not move the anchor");
+        assert_eq!(anchor, Some((2, 6)), "a scrolled screen moves the anchor with its content");
+    }
+
+    #[test]
+    fn track_anchor_follows_scrolled_prompt_up() {
+        let old: Vec<Line<'static>> = (1..=5)
+            .map(|i| Line::from(format!("out-{i}")))
+            .chain([Line::from("host# ")])
+            .collect();
+        let new: Vec<Line<'static>> = (2..=5)
+            .map(|i| Line::from(format!("out-{i}")))
+            .chain([Line::from("host# "), Line::from("new output")])
+            .collect();
+        let anchor = track_anchor(&old, &new, Some((5, 6)));
+        assert_eq!(anchor, Some((4, 6)), "the prompt row moved up one row, the anchor must follow");
+    }
+
+    #[test]
+    fn track_anchor_survives_line_insertion_above() {
+        let old = vec![
+            Line::from("alpha"),
+            Line::from("beta"),
+            Line::from("host# typed"),
+        ];
+        let new = vec![
+            Line::from("notice from above"),
+            Line::from("alpha"),
+            Line::from("beta"),
+            Line::from("host# typed"),
+        ];
+        let anchor = track_anchor(&old, &new, Some((2, 11)));
+        assert_eq!(anchor, Some((3, 11)), "insertion above shifts the anchor row, not off it");
+    }
+
+    #[test]
+    fn track_anchor_survives_line_deletion_above() {
+        let old = vec![
+            Line::from("notice from above"),
+            Line::from("alpha"),
+            Line::from("beta"),
+            Line::from("host# typed"),
+        ];
+        let new = vec![
+            Line::from("alpha"),
+            Line::from("beta"),
+            Line::from("host# typed"),
+        ];
+        let anchor = track_anchor(&old, &new, Some((3, 11)));
+        assert_eq!(anchor, Some((2, 11)), "deletion above shifts the anchor row up");
     }
 
     #[test]

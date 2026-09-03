@@ -1,5 +1,6 @@
 mod broadcast;
 mod herdr;
+mod herdr_socket;
 mod layout;
 
 use anyhow::{bail, Context as _, Result};
@@ -28,6 +29,17 @@ fn run() -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+    if let Some(pane) = std::env::var_os("SHADOW_PANE_DEBUG_SOCKET_READ") {
+        let mut client = herdr_socket::SocketClient::connect().context("socket connect")?;
+        let pane = pane.to_string_lossy().into_owned();
+        let text = client.read_visible(&pane, 10)?;
+        println!(
+            "socket read ok: {} bytes, first line: {:?}",
+            text.len(),
+            text.lines().next().unwrap_or("")
+        );
+        return Ok(());
     }
     if std::env::var_os("SHADOW_PANE_DEBUG_LIST").is_some() {
         return debug_list();
