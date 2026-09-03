@@ -2,6 +2,8 @@
 
 tmux 式 `synchronize-panes`，以 herdr 插件形式实现：把你的击键逐字符实时广播到当前 tab 的全部其他窗格。
 
+![广播页示例：多窗格镜像与影子光标](examples/shadow-pane-example.png)
+
 ## 工作方式
 
 0. 已绑定快捷键 `prefix+shift+o`（见下方"快捷键"），或从 herdr action 菜单触发 **Shadow Pane: broadcast keystrokes**（或 `herdr plugin action invoke shaozk.herdr-shadow-pane.sync`）。
@@ -46,6 +48,8 @@ description = "herdr-shadow-pane: broadcast keystrokes"
 - 广播语义为逐字符直通，不做 bracketed paste；向 agent TUI 广播时其界面对渐进输入的反应（如补全跳动）属预期行为。
 
 ## 示例
+
+广播页截图：[examples/shadow-pane-example.png](examples/shadow-pane-example.png)（见文首）
 
 镜像输出样例：
 
