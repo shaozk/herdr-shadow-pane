@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: herdr-shadow-pane
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use-cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use-cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use-cross: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use-cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        run: |
+          cmd=cargo
+          if [ "${{ matrix.use-cross }}" = "true" ]; then cmd=cross; fi
+          "$cmd" build --release --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          archive="$BIN_NAME-${{ matrix.target }}"
+          mkdir "$archive"
+          cp "target/${{ matrix.target }}/release/$BIN_NAME" "$archive/"
+          cp README.md herdr-plugin.toml "$archive/"
+          tar -czf "$archive.tar.gz" "$archive"
+          case "$RUNNER_OS" in
+            Linux) sha256sum "$archive.tar.gz" > "$archive.tar.gz.sha256" ;;
+            macOS) shasum -a 256 "$archive.tar.gz" > "$archive.tar.gz.sha256" ;;
+          esac
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
