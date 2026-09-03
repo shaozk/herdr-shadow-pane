@@ -1,5 +1,7 @@
 # herdr-shadow-pane
 
+[English](README.en-US.md) | 简体中文
+
 影分身面板：同时控制多个面板。
 
 ![示例](examples/shadow-pane-example.png)
@@ -27,7 +29,7 @@ description = "herdr-shadow-pane: broadcast keystrokes"
 要求 `herdr ≥ 0.8.0`。
 
 ```sh
-herdr plugin install <owner>/herdr-shadow-pane
+herdr plugin install shaozk/herdr-shadow-pane
 ```
 
 本地开发（本仓库即插件根目录）：
