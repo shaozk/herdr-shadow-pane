@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="herdr-shadow-pane logo">
+  <title>herdr-shadow-pane</title>
+  <desc>Two overlapping letter P glyphs: a solid mauve P in front, a translucent gray shadow clone behind, offset to the right.</desc>
+  <defs>
+    <path id="p" fill-rule="evenodd"
+      d="M0 0 H35 A29 29 0 0 1 35 58 H22 V84 H0 Z
+         M22 22 H33 A7 7 0 0 1 33 36 H22 Z"/>
+  </defs>
+  <!-- shadow clone -->
+  <use href="#p" transform="translate(54 24)" fill="#6c7086" opacity="0.6"/>
+  <!-- solid body -->
+  <use href="#p" transform="translate(10 20)" fill="#cba6f7"/>
+</svg>

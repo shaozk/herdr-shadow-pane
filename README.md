@@ -1,5 +1,7 @@
 # herdr-shadow-pane
 
+<p align="center"><img src="assets/logo.svg" width="180" alt="herdr-shadow-pane logo"></p>
+
 [English](README.en-US.md) | 简体中文
 
 影分身面板：同时控制多个面板。

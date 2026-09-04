@@ -1,5 +1,7 @@
 # herdr-shadow-pane
 
+<p align="center"><img src="assets/logo.svg" width="180" alt="herdr-shadow-pane logo"></p>
+
 English | [简体中文](README.md)
 
 Shadow Pane: control multiple panes simultaneously.
